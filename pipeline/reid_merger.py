@@ -184,8 +184,8 @@ class CrossCameraMerger:
                         crops.append(img)
             
             if not crops:
-                # 안전장치: 이미지 로드 불가 시 Zero-vector 할당
-                tracklet_features.append(np.zeros(512, dtype=np.float32))
+                # 이미지 로드 불가 트랙렛 — None으로 마킹하여 클러스터링에서 제외
+                tracklet_features.append(None)
                 continue
                 
             # 배치 단위 특징 추출
@@ -201,6 +201,107 @@ class CrossCameraMerger:
             tracklet_features.append(mean_feat)
             
         return tracklet_features
+
+    def filter_valid_tracklets(
+        self, tracklets: List[Dict], features: List
+    ) -> tuple:
+        """None 특징 벡터(이미지 로드 불가) 트랙렛을 분리.
+
+        Returns
+        -------
+        (valid_tracklets, valid_features, skipped_tracklets)
+        """
+        valid_t, valid_f, skipped = [], [], []
+        for t, feat in zip(tracklets, features):
+            if feat is None:
+                skipped.append(t)
+            else:
+                valid_t.append(t)
+                valid_f.append(feat)
+        if skipped:
+            print(f"[WARN] 이미지 로드 불가 트랙렛 {len(skipped)}개 → 클러스터링 제외, global_id = -1 마킹 예정")
+        return valid_t, valid_f, skipped
+
+    def mark_skipped_tracklets(self, skipped_tracklets: List[Dict]) -> None:
+        """이미지 로드 불가 트랙렛의 metadata.json에 global_id = -1 기록."""
+        for t in skipped_tracklets:
+            t["global_id"] = -1
+            meta_path = Path(t["tracklet_dir"]) / "metadata.json"
+            if meta_path.exists():
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+                meta["global_id"] = -1
+                with open(meta_path, "w", encoding="utf-8") as f:
+                    json.dump(meta, f, indent=2, ensure_ascii=False)
+        if skipped_tracklets:
+            print(f"[INFO] {len(skipped_tracklets)}개 트랙렛에 global_id = -1 마킹 완료")
+
+    def _has_conflict(self, t1: Dict, t2: Dict) -> bool:
+        """두 트랙렛이 must-not-link 관계인지 확인 (동일 cam+slot + 프레임 겹침)."""
+        if t1["camera_id"] != t2["camera_id"] or t1["time_slot"] != t2["time_slot"]:
+            return False
+        f1_min, f1_max = min(t1["frame_indices"]), max(t1["frame_indices"])
+        f2_min, f2_max = min(t2["frame_indices"]), max(t2["frame_indices"])
+        return max(f1_min, f2_min) <= min(f1_max, f2_max)
+
+    def enforce_must_not_link(self, labels: np.ndarray, tracklets: List[Dict]) -> np.ndarray:
+        """HAC 결과에서 제약 위반 클러스터를 greedy split으로 강제 분리.
+
+        각 클러스터 내 충돌 쌍을 찾아 그래프 컬러링으로 서브그룹 분리.
+        첫 번째 서브그룹은 원래 레이블을 유지하고, 나머지는 새 레이블을 부여.
+        """
+        from collections import defaultdict
+
+        cluster_to_idxs: dict = defaultdict(list)
+        for idx, lbl in enumerate(labels):
+            cluster_to_idxs[int(lbl)].append(idx)
+
+        new_labels = labels.copy()
+        next_label = int(max(labels)) + 1
+        split_count = 0
+
+        for lbl, idxs in cluster_to_idxs.items():
+            # 클러스터 내 충돌 쌍 수집 (idxs 내 위치 기준)
+            conflict_pairs: set = set()
+            for i in range(len(idxs)):
+                for j in range(i + 1, len(idxs)):
+                    if self._has_conflict(tracklets[idxs[i]], tracklets[idxs[j]]):
+                        conflict_pairs.add((i, j))
+
+            if not conflict_pairs:
+                continue
+
+            # Greedy coloring: 충돌 없는 첫 번째 서브그룹에 배정
+            sub_groups: List[set] = []
+            assignments: dict = {}
+
+            for pos in range(len(idxs)):
+                placed = False
+                for sg_idx, sg in enumerate(sub_groups):
+                    if not any(
+                        (min(pos, p), max(pos, p)) in conflict_pairs for p in sg
+                    ):
+                        sg.add(pos)
+                        assignments[pos] = sg_idx
+                        placed = True
+                        break
+                if not placed:
+                    sub_groups.append({pos})
+                    assignments[pos] = len(sub_groups) - 1
+
+            # 서브그룹 1+ 에 새 레이블 부여 (서브그룹 0은 원래 lbl 유지)
+            for sg_idx in range(1, len(sub_groups)):
+                new_lbl = next_label
+                next_label += 1
+                for pos in sub_groups[sg_idx]:
+                    new_labels[idxs[pos]] = new_lbl
+                    split_count += 1
+
+        if split_count > 0:
+            print(f"[INFO] 제약 위반 강제 분리: {split_count}개 트랙렛을 새 클러스터로 재배정")
+        else:
+            print("[INFO] 제약 위반 없음 — 추가 분리 불필요")
+        return new_labels
 
     def compute_distance_matrix(self, features: List[np.ndarray]) -> np.ndarray:
         """특징 벡터 리스트 간 Cosine 거리 행렬 계산."""

@@ -55,30 +55,36 @@ def main():
 
     # 3. Merger 초기화 및 피처 추출
     merger = CrossCameraMerger(config)
-    
+
     try:
-        # OSNet 피처 추출
-        features = merger.extract_tracklet_representative_features(tracklets)
+        raw_features = merger.extract_tracklet_representative_features(tracklets)
     except Exception as e:
         print(f"[ERROR] 특징 추출 중 오류 발생: {e}")
         print("[TIP] PyTorch Hub 연결 오류인 경우, 인터넷 연결을 확인하거나 torchreid 패키지를 가상환경에 설치해 주세요.")
         sys.exit(1)
 
+    # [P2-1] 이미지 로드 불가 트랙렛 분리
+    valid_tracklets, valid_features, skipped_tracklets = merger.filter_valid_tracklets(tracklets, raw_features)
+
     # 4. 거리 행렬 계산
     print("[INFO] 2단계: 트랙렛 간 유사도 거리 행렬 계산 중...")
-    dist_matrix = merger.compute_distance_matrix(features)
+    dist_matrix = merger.compute_distance_matrix(valid_features)
 
     # 5. 동시성 제약 조건 적용
     print("[INFO] 3단계: 동일 카메라 및 시간대 동시성 제약(Must-not-link Constraint) 적용 중...")
-    constrained_dist_matrix = merger.apply_must_not_link_constraints(dist_matrix, tracklets)
+    constrained_dist_matrix = merger.apply_must_not_link_constraints(dist_matrix, valid_tracklets)
 
     # 6. HAC 클러스터링 실행
     print("[INFO] 4단계: 계층적 군집화(HAC) 실행 중...")
     labels = merger.run_hac_clustering(constrained_dist_matrix)
 
+    # [P2-2] HAC 후 제약 위반 클러스터 강제 분리
+    print("[INFO] 4-1단계: Must-not-link 위반 클러스터 강제 분리 중...")
+    labels = merger.enforce_must_not_link(labels, valid_tracklets)
+
     # 7. 클러스터 검증
     print("[INFO] 5단계: 클러스터 병합 결과 제약조건 검증 중...")
-    is_valid = merger.verify_clustering_results(labels, tracklets)
+    is_valid = merger.verify_clustering_results(labels, valid_tracklets)
     if is_valid:
         print("[SUCCESS] 클러스터 검증 완료: 모든 동시성 제약 조건이 완벽히 준수되었습니다!")
     else:
@@ -86,7 +92,8 @@ def main():
 
     # 8. 최종 Global ID 메타데이터 저장
     print("[INFO] 6단계: 각 트랙렛의 metadata.json에 Global ID 기록 중...")
-    merger.update_tracklet_metadata_with_global_id(tracklets, labels)
+    merger.update_tracklet_metadata_with_global_id(valid_tracklets, labels)
+    merger.mark_skipped_tracklets(skipped_tracklets)
 
     # 9. 결과 요약 통계 출력
     num_original_tracks = len(tracklets)
@@ -102,7 +109,7 @@ def main():
     
     # 카메라별/슬롯별 병합 분포 출력
     cam_slot_counts = {}
-    for t, label in zip(tracklets, labels):
+    for t, label in zip(valid_tracklets, labels):
         key = f"c{t['camera_id']}_t{t['time_slot']}"
         cam_slot_counts.setdefault(label, []).append(key)
 
