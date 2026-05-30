@@ -94,3 +94,9 @@ reid:
 market1501:
   output_dir: "data/market1501"
   train_ratio: 0.7 # 70%는 학습용(bounding_box_train), 30%는 평가용(query & bounding_box_test)
+
+# --- Zero-shot 평가 (Phase 2) ---
+evaluation:
+  batch_size: 64
+  top_k: [1, 5, 10]
+  output_dir: "data/eval_results"
