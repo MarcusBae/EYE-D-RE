@@ -177,6 +177,14 @@ class MarketEvaluator:
         print(f"[Eval] Query  : {len(q_paths)}장, {len(set(q_pids))}개 ID")
         print(f"[Eval] Gallery: {len(g_paths)}장, {len(set(g_pids))}개 ID")
 
+        if len(q_paths) == 0 or len(g_paths) == 0:
+            raise FileNotFoundError(
+                f"[ERROR] Query 또는 Gallery 이미지가 없습니다 (Query: {len(q_paths)}장, Gallery: {len(g_paths)}장).\n"
+                f"확인한 경로: {self.market_dir.resolve()}\n"
+                f"구글 코랩 실행 시 '%cd /content/drive/MyDrive/projects/EYE-D-RE'로 이동했는지 확인하거나,\n"
+                f"데이터 변환 스크립트 'python scripts/format_market1501.py'를 먼저 실행했는지 확인해 주세요."
+            )
+
         print("[Eval] Query 특징 추출 중...")
         q_feats = extract_features(q_paths, extractor, self.batch_size)
 
