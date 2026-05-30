@@ -1,0 +1,43 @@
+# Data (영상/프레임/tracklet은 repo에 포함하지 않음)
+data/
+!data/.gitkeep
+
+# Model weights
+*.pt
+*.pth
+*.onnx
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Logs / Outputs
+*.log
+runs/
+outputs/
+*.zip
+
+# Local notes
+note.md
+

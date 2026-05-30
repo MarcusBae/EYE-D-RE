@@ -1,0 +1,10 @@
+# Ultralytics ByteTrack 설정
+# 참고: https://docs.ultralytics.com/modes/track/
+
+tracker_type: bytetrack # tracker type, ['botsort', 'bytetrack']
+track_high_thresh: 0.6 # 첫 단계 association을 위한 high confidence 임계값
+track_low_thresh: 0.1 # 두 번째 단계 association을 위한 low confidence 임계값
+new_track_thresh: 0.7 # 새 track 생성 임계값 (높을수록 보수적)
+track_buffer: 30 # track 보존 frame 수 (사라진 후 매칭 대기)
+match_thresh: 0.8 # IoU matching 임계값
+fuse_score: True # confidence와 IoU 융합

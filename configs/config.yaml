@@ -1,0 +1,75 @@
+# =====================================================
+# Person Re-ID Project — Global Config
+# =====================================================
+
+# --- 데이터 경로 ---
+data:
+  video_dir: "data/raw_videos"
+  frame_dir: "data/frames"
+  tracklet_dir: "data/tracklets"
+  filtered_dir: "data/filtered"
+
+# --- 영상 파일 → (camera_id, time_slot) 매핑 ---
+# 영상 파일 확장자가 다르면(.avi/.mov/.mkv) 키를 그대로 바꾸세요.
+videos:
+  cam1_t1.avi: {camera: 1, slot: 1}
+  cam1_t2.avi: {camera: 1, slot: 2}
+  cam2_t1.avi: {camera: 2, slot: 1}
+  cam2_t2.avi: {camera: 2, slot: 2}
+  cam3_t1.avi: {camera: 3, slot: 1}
+  cam3_t2.avi: {camera: 3, slot: 2}
+
+# --- 프레임 추출 ---
+frame_extraction:
+  target_fps: 5 # 원본 25~30fps → 5fps 샘플링 (용량 절감)
+  image_format: "jpg"
+  jpg_quality: 95
+
+# --- 검출 (YOLOv8n) ---
+detection:
+  model: "yolov8n.pt" # nano (최경량, 빠름)
+  conf_threshold: 0.5
+  iou_threshold: 0.45
+  classes: [0] # COCO class 0 = person
+  imgsz: 640
+  device: "auto" # auto | cuda | cpu
+
+# --- 트래킹 (ByteTrack — Ultralytics 내장) ---
+tracking:
+  tracker_yaml: "configs/bytetrack.yaml"
+  # bytetrack.yaml 내부에 ByteTrack 하이퍼파라미터가 들어있음
+  # (track_high_thresh, track_low_thresh, new_track_thresh, match_thresh, track_buffer)
+
+# --- 품질 필터링 (보수적) ---
+quality_filter:
+  min_track_length: 30 # 최소 30 frame (5fps → 6초 이상의 영상만)
+  min_avg_confidence: 0.7 # YOLO 평균 검출 신뢰도 
+  min_bbox_height: 80 # px
+  min_bbox_width: 40 # px
+  max_aspect_ratio: 4.0 # height / width
+  min_bbox_area: 5000 # px^2
+
+# --- 기타 ---
+runtime:
+  seed: 42
+  num_workers: 4
+  log_level: "INFO"
+
+# --- Cross-camera ID 병합 (Phase 1E) ---
+reid:
+  model_name: "osnet_x1_0" # OSNet 백본 모델 크기 (osnet_x1_0, osnet_x0_75 등)
+  pretrained: true
+  device: "auto" # auto | cuda | cpu
+  batch_size: 64
+  # HAC(Hierarchical Agglomerative Clustering) 하이퍼파라미터
+  clustering:
+    threshold: 0.5 # Cosine Distance 병합 임계치 (높을수록 더 쉽게 병합됨, 낮을수록 보수적)
+    metric: "cosine"
+    linkage: "average" # average | complete | single
+
+# --- Market-1501 포맷 변환 (Phase 1F) ---
+market1501:
+  output_dir: "data/market1501"
+  train_ratio: 0.7 # 70%는 학습용(bounding_box_train), 30%는 평가용(query & bounding_box_test)
+
+

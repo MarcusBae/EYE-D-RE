@@ -1,0 +1,124 @@
+#!/usr/bin/env python
+"""
+merge_ids.py
+============
+CCTV 트랙렛들의 OSNet 외형 피처를 추출하고, 
+동시성 제약 조건이 가미된 HAC(Hierarchical Agglomerative Clustering)를 사용해
+카메라 간 동일인 ID를 매핑(Global ID 병합)하는 배치 실행 스크립트.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+import yaml
+
+# 프로젝트 루트 경로 추가 (src 모듈 임포트용)
+project_root = Path(__file__).resolve().parent.parent
+if str(project_root) not in sys.path:
+    sys.path.append(str(project_root))
+
+from pipeline.tracklet_io import list_tracklets
+from pipeline.reid_merger import CrossCameraMerger
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Cross-camera ID Merger (Phase 1E)")
+    parser.add_argument(
+        "--config",
+        type=str,
+        default="configs/config.yaml",
+        help="Path to global configuration YAML file"
+    )
+    args = parser.parse_args()
+
+    # 1. Config 로드
+    config_path = Path(args.config)
+    if not config_path.exists():
+        print(f"[ERROR] 설정을 찾을 수 없습니다: {config_path}")
+        sys.exit(1)
+
+    with open(config_path, "r", encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+
+    filtered_dir = config.get("data", {}).get("filtered_dir", "data/filtered")
+    print(f"[INFO] 1단계: 정제 완료된 트랙렛 폴더 스캔: {filtered_dir}")
+
+    # 2. 정제 완료된 트랙렛 리스트 수집
+    tracklets = list_tracklets(filtered_dir)
+    if not tracklets:
+        print(f"[WARNING] '{filtered_dir}' 내에 트랙렛이 존재하지 않습니다. 먼저 filter_tracklets.py를 실행하세요.")
+        sys.exit(0)
+
+    print(f"[INFO] 총 {len(tracklets)}개의 정제된 트랙렛이 탐색되었습니다.")
+
+    # 3. Merger 초기화 및 피처 추출
+    merger = CrossCameraMerger(config)
+    
+    try:
+        # OSNet 피처 추출
+        features = merger.extract_tracklet_representative_features(tracklets)
+    except Exception as e:
+        print(f"[ERROR] 특징 추출 중 오류 발생: {e}")
+        print("[TIP] PyTorch Hub 연결 오류인 경우, 인터넷 연결을 확인하거나 torchreid 패키지를 가상환경에 설치해 주세요.")
+        sys.exit(1)
+
+    # 4. 거리 행렬 계산
+    print("[INFO] 2단계: 트랙렛 간 유사도 거리 행렬 계산 중...")
+    dist_matrix = merger.compute_distance_matrix(features)
+
+    # 5. 동시성 제약 조건 적용
+    print("[INFO] 3단계: 동일 카메라 및 시간대 동시성 제약(Must-not-link Constraint) 적용 중...")
+    constrained_dist_matrix = merger.apply_must_not_link_constraints(dist_matrix, tracklets)
+
+    # 6. HAC 클러스터링 실행
+    print("[INFO] 4단계: 계층적 군집화(HAC) 실행 중...")
+    labels = merger.run_hac_clustering(constrained_dist_matrix)
+
+    # 7. 클러스터 검증
+    print("[INFO] 5단계: 클러스터 병합 결과 제약조건 검증 중...")
+    is_valid = merger.verify_clustering_results(labels, tracklets)
+    if is_valid:
+        print("[SUCCESS] 클러스터 검증 완료: 모든 동시성 제약 조건이 완벽히 준수되었습니다!")
+    else:
+        print("[WARNING] 클러스터 검증 결과 일부 제약 조건이 위반되었을 가능성이 있습니다. 로그를 확인하세요.")
+
+    # 8. 최종 Global ID 메타데이터 저장
+    print("[INFO] 6단계: 각 트랙렛의 metadata.json에 Global ID 기록 중...")
+    merger.update_tracklet_metadata_with_global_id(tracklets, labels)
+
+    # 9. 결과 요약 통계 출력
+    num_original_tracks = len(tracklets)
+    num_global_ids = len(set(labels))
+    compression_ratio = (1.0 - (num_global_ids / num_original_tracks)) * 100
+
+    print("\n" + "="*50)
+    print("🎯 Cross-camera ID 병합 (Phase 1E) 완료 요약")
+    print("="*50)
+    print(f"* 정제 트랙렛(로컬 ID) 총수  : {num_original_tracks} 개")
+    print(f"* 병합 후 Global ID 총수     : {num_global_ids} 개")
+    print(f"* ID 병합 압축률             : {compression_ratio:.1f} %")
+    
+    # 카메라별/슬롯별 병합 분포 출력
+    cam_slot_counts = {}
+    for t, label in zip(tracklets, labels):
+        key = f"c{t['camera_id']}_t{t['time_slot']}"
+        cam_slot_counts.setdefault(label, []).append(key)
+
+    print("\n* 주요 Global ID 매핑 정보 (상위 10개):")
+    sorted_global_ids = sorted(
+        [(gid, paths) for gid, paths in cam_slot_counts.items()],
+        key=lambda x: len(x[1]),
+        reverse=True
+    )
+    for gid, paths in sorted_global_ids[:10]:
+        unique_cams = set([p.split('_')[0] for p in paths])
+        print(f"  - Global ID {gid:03d} : 총 {len(paths)}회 매핑 ({', '.join(sorted(set(paths)))}) [카메라 {len(unique_cams)}대 분산]")
+        
+    print("="*50)
+    print("[SUCCESS] Cross-camera ID 병합이 성공적으로 끝났습니다. 다음 단계는 Phase 1F(Market-1501 변환)입니다.")
+
+
+if __name__ == "__main__":
+    main()

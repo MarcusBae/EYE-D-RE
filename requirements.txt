@@ -1,0 +1,41 @@
+# Person Re-ID Project — Phase 0~1 EYE-D Requirements
+# Python 3.10+ 권장
+
+# Deep Learning (PyTorch — Colab엔 사전설치, 로컬은 환경에 맞게 설치 권장)
+# CUDA 환경: https://pytorch.org/get-started/locally/ 참고
+torch>=2.0
+torchvision>=0.15
+
+# Object Detection & Tracking
+ultralytics>=8.1.0 # YOLOv8 + 내장 ByteTrack
+lap>=0.4.0 # ByteTrack 의존성 (LAPJV)
+filterpy>=1.4.5 # 칼만 필터 (트래커 보조)
+
+# Image / Video I/O
+opencv-python>=4.8.0
+opencv-contrib-python>=4.8.0
+Pillow>=9.5.0
+imageio>=2.31.0
+imageio-ffmpeg>=0.4.9 # AVI/MOV/MKV 호환
+
+# Scientific Stack
+numpy>=1.24
+pandas>=2.0
+scipy>=1.10
+
+# Visualization
+matplotlib>=3.7
+seaborn>=0.12
+
+# Config & Utilities
+pyyaml>=6.0
+tqdm>=4.65
+gdown>=4.6.0 # torchreid 가중치 다운로드용
+torchreid>=0.2.5
+tensorboard>=2.10.0 # torchreid 의존성
+
+# Notebook (Colab엔 사전설치)
+ipykernel>=6.25
+ipywidgets>=8.0
+
+
