@@ -1,9 +1,9 @@
-import os
 import shutil
 import random
 import re
+from collections import defaultdict
 from pathlib import Path
-from typing import List, Dict, Set, Tuple
+from typing import List, Dict
 from tqdm import tqdm
 from .tracklet_io import list_tracklets
 
@@ -11,8 +11,9 @@ class MarketFormatter:
     """
     정제된 트랙렛 데이터셋을 Re-ID 표준 포맷인 Market-1501 형식으로 변환.
     - 전체 global_id를 중복 없이 Train/Test ID로 분할 (Disjoint Split)
-    - Test ID에 속하는 이미지는 Query(대표 1장)와 Gallery(나머지)로 분배
-    - 파일명을 [personID:04d]_c[cam]s[slot]_[frameID:06d]_00.jpg 규격으로 변환 및 복사
+    - Test ID: (global_id, camera_id) 쌍당 중간 프레임 1장 → query,
+               나머지 모든 이미지 → bounding_box_test (gallery)
+    - 파일명: [personID:04d]_c[cam]s[slot]_[frameID:06d]_00.jpg
     """
     def __init__(self, config: Dict):
         self.config = config
@@ -97,41 +98,54 @@ class MarketFormatter:
             "copied_query_images": 0
         }
 
-        for t in tqdm(valid_tracklets, desc="Formatting to Market-1501"):
+        # --- Train: 전체 이미지 → bounding_box_train ---
+        train_tracklets = [t for t in valid_tracklets if t["global_id"] in train_ids]
+        for t in tqdm(train_tracklets, desc="Train"):
             tdir = Path(t["tracklet_dir"])
             gid = t["global_id"]
-            cam = self._extract_number(t.get("camera", "c0"))
-            slot = self._extract_number(t.get("time_slot", "t0"))
-            crop_files = sorted(t.get("crop_files", []))
-            
-            if not crop_files:
-                continue
+            cam = self._extract_number(t.get("camera_id", 0))
+            slot = self._extract_number(t.get("time_slot", 0))
+            for fname in sorted(t.get("crop_files", [])):
+                src_path = tdir / fname
+                if not src_path.exists():
+                    continue
+                frame_num = self._parse_frame_num(fname)
+                dst_name = f"{gid:04d}_c{cam}s{slot}_{frame_num:06d}_00.jpg"
+                shutil.copy2(src_path, train_out / dst_name)
+                stats["copied_train_images"] += 1
 
-            # Train ID 분기 (전체 이미지 -> Train 폴더)
-            if gid in train_ids:
-                for fname in crop_files:
-                    src_path = tdir / fname
-                    if not src_path.exists():
-                        continue
-                    
-                    frame_num = self._parse_frame_num(fname)
-                    dst_name = f"{gid:04d}_c{cam}s{slot}_{frame_num:06d}_00.jpg"
-                    shutil.copy2(src_path, train_out / dst_name)
-                    stats["copied_train_images"] += 1
-            
-            # Test ID 분기 (첫 프레임 -> Query, 나머지 -> Gallery/Test 폴더)
-            else:
+        # --- Test: (gid, camera_id) 쌍당 중간 프레임 1장 → query, 나머지 → gallery ---
+        # Market-1501 표준: query는 카메라별 1장, gallery는 다른 카메라 이미지
+        by_gid_cam: Dict = defaultdict(list)
+        for t in valid_tracklets:
+            if t["global_id"] in test_ids:
+                cam = self._extract_number(t.get("camera_id", 0))
+                by_gid_cam[(t["global_id"], cam)].append(t)
+
+        for (gid, cam), group in tqdm(by_gid_cam.items(), desc="Test/Query"):
+            # 시작 프레임 기준 정렬 → 첫 번째 트랙렛의 중간 프레임을 query로 선택
+            group.sort(key=lambda x: min(x.get("frame_indices", [0])))
+            query_done = False
+
+            for t in group:
+                tdir = Path(t["tracklet_dir"])
+                slot = self._extract_number(t.get("time_slot", 0))
+                crop_files = sorted(t.get("crop_files", []))
+                if not crop_files:
+                    continue
+
+                mid = len(crop_files) // 2
                 for idx, fname in enumerate(crop_files):
                     src_path = tdir / fname
                     if not src_path.exists():
                         continue
-                        
                     frame_num = self._parse_frame_num(fname)
                     dst_name = f"{gid:04d}_c{cam}s{slot}_{frame_num:06d}_00.jpg"
-                    
-                    if idx == 0:
+
+                    if not query_done and idx == mid:
                         shutil.copy2(src_path, query_out / dst_name)
                         stats["copied_query_images"] += 1
+                        query_done = True
                     else:
                         shutil.copy2(src_path, test_out / dst_name)
                         stats["copied_test_images"] += 1
