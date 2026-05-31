@@ -3,7 +3,10 @@ import re
 import shutil
 
 def rename_videos():
-    dir_path = "/home/torious/projects/tmp/EYE-D-Restart/data/raw_videos"
+    # 스크립트 파일 위치 기준 절대 경로 계산
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(script_dir)
+    dir_path = os.path.join(project_root, "data", "raw_videos")
     backup_dir = os.path.join(dir_path, "backup_old")
     
     # 1. 매핑 정의
