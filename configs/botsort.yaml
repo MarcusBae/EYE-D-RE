@@ -1,0 +1,22 @@
+# Ultralytics BoT-SORT 설정
+# ByteTrack + Re-ID 외형 특징 + 카메라 모션 보상
+# 참고: https://docs.ultralytics.com/modes/track/
+
+tracker_type: botsort
+
+# --- Detection association ---
+track_high_thresh: 0.6    # 1차 association high-confidence 임계값
+track_low_thresh: 0.1     # 2차 association low-confidence 임계값
+new_track_thresh: 0.7     # 신규 track 생성 임계값 (높을수록 보수적)
+track_buffer: 60          # 소실 후 track 보존 프레임 수 (bytetrack 30 → 60으로 증가)
+match_thresh: 0.8         # IoU 기반 1차 매칭 임계값
+fuse_score: True
+
+# --- 카메라 모션 보상 ---
+gmc_method: sparseOptFlow  # 고정 CCTV는 none도 가능, 카메라 흔들림 있으면 sparseOptFlow
+
+# --- Re-ID appearance (BoT-SORT 핵심) ---
+with_reid: True            # Re-ID 외형 특징 활성화 (겹침 상황 ID switch 방지)
+model: auto                # Re-ID 모델 (auto = YOLO 백본 특징 재사용, 별도 모델 불필요)
+proximity_thresh: 0.5      # Re-ID 적용 전 IoU 근접도 필터
+appearance_thresh: 0.25    # cosine distance 상한 (낮을수록 엄격)

@@ -57,11 +57,11 @@ detection:
   imgsz: 640
   device: "auto" # auto | cuda | cpu
 
-# --- 트래킹 (ByteTrack — Ultralytics 내장) ---
+# --- 트래킹 (BoT-SORT — Ultralytics 내장) ---
 tracking:
-  tracker_yaml: "configs/bytetrack.yaml"
-  # bytetrack.yaml 내부에 ByteTrack 하이퍼파라미터가 들어있음
-  # (track_high_thresh, track_low_thresh, new_track_thresh, match_thresh, track_buffer)
+  tracker_yaml: "configs/botsort.yaml"
+  # botsort.yaml: Re-ID 외형 특징으로 겹침 상황 ID switch 방지
+  # (bytetrack.yaml로 교체하면 이전 ByteTrack으로 복귀 가능)
 
 # --- 품질 필터링 (보수적) ---
 quality_filter:

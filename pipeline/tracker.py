@@ -1,10 +1,12 @@
 """
 tracker.py
 ==========
-ByteTrack 래퍼 (Ultralytics 내장).
+BoT-SORT 래퍼 (Ultralytics 내장).
 
 Ultralytics의 ``YOLO.track()`` 메서드는 ByteTrack/BoT-SORT를 내장하고 있어
-별도 yolox/cython_bbox 의존성 없이 동작합니다.
+별도 의존성 없이 동작합니다.
+BoT-SORT는 IoU 기반 motion 매칭에 Re-ID 외형 특징을 추가하여
+두 사람이 겹칠 때 발생하는 ID switch를 억제합니다.
 영상 한 개에 대해 tracking 결과를 frame별로 모아 tracklet 단위로 정리합니다.
 """
 
@@ -25,7 +27,7 @@ from .tracklet_io import save_tracklet
 
 class PersonTracker:
     """
-    Ultralytics YOLO + ByteTrack을 이용한 person tracking.
+    Ultralytics YOLO + BoT-SORT를 이용한 person tracking.
 
     영상 한 개를 입력받아:
     1. frame 단위로 검출 + 트래킹 수행
@@ -42,7 +44,7 @@ class PersonTracker:
     def __init__(
         self,
         model_path: str = "yolov8n.pt",
-        tracker_yaml: str = "configs/bytetrack.yaml",
+        tracker_yaml: str = "configs/botsort.yaml",
         conf: float = 0.5,
         iou: float = 0.45,
         imgsz: int = 640,
