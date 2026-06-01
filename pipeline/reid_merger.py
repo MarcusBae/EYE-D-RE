@@ -32,6 +32,7 @@ class OSNetExtractor:
         self,
         model_name: str = "osnet_x1_0",
         pretrained: bool = True,
+        weights_path: str = None,
         device: str = "auto",
     ):
         if device == "auto":
@@ -42,7 +43,7 @@ class OSNetExtractor:
         print(f"[INFO] OSNet Extractor 디바이스 설정: {self.device}")
 
         # PyTorch Hub 또는 torchreid를 통해 OSNet 모델 로드
-        self.model = self._load_model(model_name, pretrained)
+        self.model = self._load_model(model_name, pretrained, weights_path)
         self.model.to(self.device)
         self.model.eval()
 
@@ -56,8 +57,31 @@ class OSNetExtractor:
             )
         ])
 
-    def _load_model(self, model_name: str, pretrained: bool) -> nn.Module:
-        # 1순위: torch.hub 로딩 시도 (deep-person-reid 공식 허브 리포지토리)
+    def _load_model(self, model_name: str, pretrained: bool,
+                    weights_path: str = None) -> nn.Module:
+        # 1순위: 로컬 가중치 파일 지정된 경우 (Market-1501 등 Re-ID pretrained)
+        if weights_path:
+            from pathlib import Path
+            wp = Path(weights_path)
+            if not wp.exists():
+                raise FileNotFoundError(f"가중치 파일을 찾을 수 없습니다: {wp.resolve()}")
+            print(f"[INFO] 로컬 가중치 로딩: {wp.name}")
+            model = torch.hub.load(
+                "KaiyangZhou/deep-person-reid",
+                model_name,
+                pretrained=False   # 아키텍처만 로드
+            )
+            state = torch.load(wp, map_location="cpu")
+            # torchreid checkpoint 형식 대응 (state_dict 키 자동 감지)
+            if "state_dict" in state:
+                state = state["state_dict"]
+            elif "model" in state:
+                state = state["model"]
+            model.load_state_dict(state, strict=False)
+            print(f"[INFO] Re-ID pretrained 가중치 로드 완료: {wp.name}")
+            return model
+
+        # 2순위: torch.hub 로딩 (ImageNet pretrained)
         try:
             print(f"[INFO] torch.hub를 통해 {model_name} 로딩 시도...")
             model = torch.hub.load(
@@ -69,7 +93,7 @@ class OSNetExtractor:
         except Exception as e:
             print(f"[WARN] torch.hub 로딩 실패: {e}")
 
-        # 2순위: torchreid 라이브러리가 로컬에 이미 설치된 경우 빌드 시도
+        # 3순위: torchreid 라이브러리가 로컬에 이미 설치된 경우
         try:
             print(f"[INFO] 로컬 torchreid 모듈을 통해 {model_name} 로딩 시도...")
             import torchreid
@@ -82,7 +106,6 @@ class OSNetExtractor:
         except Exception as e:
             print(f"[WARN] torchreid 라이브러리 빌드 실패: {e}")
 
-        # 3순위: 아키텍처와 가중치 파일 수동 다운로드 폴백 등 에러 메시지
         raise RuntimeError(
             f"OSNet 모델 ({model_name}) 로드 실패. "
             "인터넷 연결을 확인하거나 'pip install torchreid'를 수행하세요."
@@ -134,6 +157,7 @@ class CrossCameraMerger:
         reid_cfg = config.get("reid", {})
         self.model_name = reid_cfg.get("model_name", "osnet_x1_0")
         self.pretrained = reid_cfg.get("pretrained", True)
+        self.weights_path = reid_cfg.get("weights_path", None)
         self.device = reid_cfg.get("device", "auto")
         self.batch_size = reid_cfg.get("batch_size", 64)
         
@@ -150,6 +174,7 @@ class CrossCameraMerger:
             self.extractor = OSNetExtractor(
                 model_name=self.model_name,
                 pretrained=self.pretrained,
+                weights_path=self.weights_path,
                 device=self.device
             )
 
