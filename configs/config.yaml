@@ -7,7 +7,7 @@ data:
   video_dir: "data/raw_videos"
   frame_dir: "data/frames"
   tracklet_dir: "data/tracklets"
-  filtered_dir: "data/filtered"
+  filtered_dir: "data/filtered-v1"
 
 # --- 영상 파일 → (camera_id, time_slot) 매핑 ---
 # 영상 파일 확장자가 다르면(.avi/.mov/.mkv) 키를 그대로 바꾸세요.
@@ -63,14 +63,17 @@ tracking:
   # botsort.yaml: Re-ID 외형 특징으로 겹침 상황 ID switch 방지
   # (bytetrack.yaml로 교체하면 이전 ByteTrack으로 복귀 가능)
 
-# --- 품질 필터링 (보수적) ---
+# --- 품질 필터링 ---
+# reduce_tracklet_frames --stride 5 적용 후 기준 (0.8fps 환경)
+# min_track_length: 30 → 6 (stride 5 적용 시 30프레임 = 원본 150프레임 = 37.5초로 너무 엄격)
+# min_bbox_height/width: 256×128 리사이즈 이후 기준으로 완화
 quality_filter:
-  min_track_length: 30 # 최소 30 frame (5fps → 6초 이상의 영상만)
-  min_avg_confidence: 0.7 # YOLO 평균 검출 신뢰도 
-  min_bbox_height: 80 # px
-  min_bbox_width: 40 # px
-  max_aspect_ratio: 4.0 # height / width
-  min_bbox_area: 5000 # px^2
+  min_track_length: 6   # 0.8fps 기준 6프레임 = 약 7.5초 분량
+  min_avg_confidence: 0.7
+  min_bbox_height: 64   # px (리사이즈 후 기준)
+  min_bbox_width: 32    # px
+  max_aspect_ratio: 4.0
+  min_bbox_area: 2048   # px^2 (64×32)
 
 # --- 기타 ---
 runtime:
@@ -91,13 +94,13 @@ reid:
   batch_size: 64
   # HAC(Hierarchical Agglomerative Clustering) 하이퍼파라미터
   clustering:
-    threshold: 0.25 # Cosine Distance 병합 임계치 (높을수록 더 쉽게 병합됨, 낮을수록 보수적)
+    threshold: 0.20 # Cosine Distance 병합 임계치 (높을수록 더 쉽게 병합됨, 낮을수록 보수적)
     metric: "cosine"
     linkage: "average" # average | complete | single
 
 # --- Market-1501 포맷 변환 (Phase 1F) ---
 market1501:
-  output_dir: "data/market1501"
+  output_dir: "data/market1501-v1"
   train_ratio: 0.7 # 70%는 학습용(bounding_box_train), 30%는 평가용(query & bounding_box_test)
 
 # --- Zero-shot 평가 (Phase 2) ---
