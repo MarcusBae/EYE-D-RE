@@ -26,7 +26,18 @@ def main():
     with open(config_path, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
-    # 2. Formatter 초기화 및 실행
+    # 2. 기존 출력 폴더 확인 및 삭제
+    import shutil
+    output_dir = Path(config.get("market1501", {}).get("output_dir", "data/market1501"))
+    if output_dir.exists():
+        ans = input(f"[WARN] '{output_dir}' 폴더가 이미 존재합니다. 삭제하고 새로 생성할까요? [y/N] ").strip().lower()
+        if ans != "y":
+            print("취소되었습니다.")
+            sys.exit(0)
+        shutil.rmtree(output_dir)
+        print(f"[INFO] '{output_dir}' 삭제 완료")
+
+    # 3. Formatter 초기화 및 실행
     print("[INFO] Market-1501 데이터셋 포맷 변환 시작...")
     formatter = MarketFormatter(config)
     
