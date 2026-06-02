@@ -66,19 +66,38 @@ class OSNetExtractor:
             if not wp.exists():
                 raise FileNotFoundError(f"가중치 파일을 찾을 수 없습니다: {wp.resolve()}")
             print(f"[INFO] 로컬 가중치 로딩: {wp.name}")
-            model = torch.hub.load(
-                "KaiyangZhou/deep-person-reid",
-                model_name,
-                pretrained=False   # 아키텍처만 로드
-            )
+            # 아키텍처 로드: torch.hub 실패 시 torchreid로 fallback
+            model = None
+            try:
+                model = torch.hub.load(
+                    "KaiyangZhou/deep-person-reid",
+                    model_name,
+                    pretrained=False
+                )
+            except Exception as e:
+                print(f"[WARN] torch.hub 아키텍처 로드 실패, torchreid로 전환: {e}")
+            if model is None:
+                import torchreid
+                model = torchreid.models.build_model(
+                    name=model_name,
+                    num_classes=1000,
+                    pretrained=False
+                )
             state = torch.load(wp, map_location="cpu")
             # torchreid checkpoint 형식 대응 (state_dict 키 자동 감지)
             if "state_dict" in state:
                 state = state["state_dict"]
             elif "model" in state:
                 state = state["model"]
-            model.load_state_dict(state, strict=False)
-            print(f"[INFO] Re-ID pretrained 가중치 로드 완료: {wp.name}")
+            # shape mismatch(classifier 클래스 수 등) 키 제외 후 로드
+            model_state = model.state_dict()
+            compatible = {k: v for k, v in state.items()
+                          if k in model_state and v.shape == model_state[k].shape}
+            model_state.update(compatible)
+            model.load_state_dict(model_state)
+            skipped = len(state) - len(compatible)
+            print(f"[INFO] Re-ID pretrained 가중치 로드 완료: {wp.name} "
+                  f"({len(compatible)}/{len(state)} 레이어, {skipped}개 shape 불일치 제외)")
             return model
 
         # 2순위: torch.hub 로딩 (ImageNet pretrained)
