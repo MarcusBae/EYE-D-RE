@@ -26,7 +26,7 @@ from pathlib import Path
 MIN_FRAMES = 3  # 이 미만으로 남은 트랙렛은 폴더째 삭제
 
 
-def sync_one(tdir: Path, dry_run: bool) -> str:
+def sync_one(tdir: Path, dry_run: bool, min_frames: int = MIN_FRAMES) -> str:
     """
     트랙렛 디렉토리 1개를 동기화.
     반환값: "ok" | "updated" | "deleted" | "skip"
@@ -93,8 +93,7 @@ def main():
                         help=f"트랙렛 최소 프레임 수 (기본: {MIN_FRAMES}, 미만 시 폴더 삭제)")
     args = parser.parse_args()
 
-    global MIN_FRAMES
-    MIN_FRAMES = args.min_frames
+    min_frames = args.min_frames
 
     root = Path(args.path)
     if not root.exists():
@@ -108,7 +107,7 @@ def main():
 
     counts = {"ok": 0, "updated": 0, "deleted": 0, "skip": 0}
     for tdir in tracklet_dirs:
-        result = sync_one(tdir, args.dry_run)
+        result = sync_one(tdir, args.dry_run, min_frames)
         counts[result] += 1
         if result in ("updated", "deleted"):
             tag = "[삭제]" if result == "deleted" else "[갱신]"
@@ -118,7 +117,7 @@ def main():
     print("=" * 40)
     print(f"  정상(변경 없음) : {counts['ok']}개")
     print(f"  metadata 갱신   : {counts['updated']}개")
-    print(f"  폴더 삭제       : {counts['deleted']}개  (프레임 {MIN_FRAMES}개 미만)")
+    print(f"  폴더 삭제       : {counts['deleted']}개  (프레임 {min_frames}개 미만)")
     print(f"  건너뜀          : {counts['skip']}개  (metadata.json 없음)")
     if args.dry_run:
         print("\n  ※ --dry-run 모드: 실제 변경 없음")

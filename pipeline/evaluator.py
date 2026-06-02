@@ -43,14 +43,20 @@ def load_market_split(split_dir: str) -> Tuple[List[Path], np.ndarray, np.ndarra
     """
     split_dir = Path(split_dir)
     paths, pids, cams = [], [], []
+    skipped_count = 0
+    total_count = 0
     for fpath in sorted(split_dir.glob("*.jpg")):
+        total_count += 1
         try:
             pid, cam, _, _ = parse_market_filename(fpath.name)
         except ValueError:
+            skipped_count += 1
             continue
         paths.append(fpath)
         pids.append(pid)
         cams.append(cam)
+    if skipped_count > 0:
+        print(f"[WARN] {split_dir.name} 폴더에서 파일명 형식 불일치로 {skipped_count}개의 이미지가 제외되었습니다. (총 {total_count}개 중 {skipped_count}개 제외)")
     return paths, np.array(pids), np.array(cams)
 
 
