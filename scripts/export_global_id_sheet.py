@@ -144,8 +144,8 @@ def split_and_save(blocks: list[Image.Image], sheet_w: int,
 def main():
     parser = argparse.ArgumentParser(description="Global ID 썸네일 시트 생성")
     parser.add_argument("global_id", type=int, help="조회할 Global ID")
-    parser.add_argument("--filtered-dir", default="data/filtered",
-                        help="filtered 데이터 루트 경로 (기본: data/filtered)")
+    parser.add_argument("--filtered-dir", default="data/curated",
+                        help="트랙렛 데이터 루트 경로 (기본: data/curated)")
     parser.add_argument("--out", default="outputs/sheets",
                         help="출력 디렉토리 (기본: outputs/sheets)")
     parser.add_argument("--thumb-size", type=int, default=80,
