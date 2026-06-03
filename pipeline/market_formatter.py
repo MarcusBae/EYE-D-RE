@@ -11,8 +11,9 @@ class MarketFormatter:
     """
     정제된 트랙렛 데이터셋을 Re-ID 표준 포맷인 Market-1501 형식으로 변환.
     - 전체 global_id를 중복 없이 Train/Test ID로 분할 (Disjoint Split)
-    - Test ID: (global_id, camera_id) 쌍당 중간 프레임 1장 → query,
-               나머지 모든 이미지 → bounding_box_test (gallery)
+    - Test ID 전체 이미지 → bounding_box_test (gallery)
+    - Query: 2개 이상 카메라에 등장한 test ID만, 카메라별 대표 1장
+             (cross-camera 평가 보장, 단일 카메라 ID는 query 미선발)
     - 파일명: [personID:04d]_c[cam]s[slot]_[frameID:06d]_00.jpg
     """
     def __init__(self, config: Dict):
@@ -114,41 +115,58 @@ class MarketFormatter:
                 shutil.copy2(src_path, train_out / dst_name)
                 stats["copied_train_images"] += 1
 
-        # --- Test: (gid, camera_id) 쌍당 중간 프레임 1장 → query, 나머지 → gallery ---
-        # Market-1501 표준: query는 카메라별 1장, gallery는 다른 카메라 이미지
-        by_gid_cam: Dict = defaultdict(list)
+        # --- Test: 전체 이미지 → gallery, cross-camera query 선발 ---
+        # Market-1501 표준 프로토콜:
+        #   gallery = test ID 전체 이미지 (모든 카메라)
+        #   query   = 2개 이상 카메라에 등장한 인물만, 카메라별 대표 1장
+        #   평가 시 query와 같은 cam+pid는 junk로 제외 (evaluator가 처리)
+
+        # gid → cam → tracklet 목록
+        by_gid: Dict = defaultdict(lambda: defaultdict(list))
         for t in valid_tracklets:
             if t["global_id"] in test_ids:
                 cam = self._extract_number(t.get("camera_id", 0))
-                by_gid_cam[(t["global_id"], cam)].append(t)
+                by_gid[t["global_id"]][cam].append(t)
 
-        for (gid, cam), group in tqdm(by_gid_cam.items(), desc="Test/Query"):
-            # 시작 프레임 기준 정렬 → 첫 번째 트랙렛의 중간 프레임을 query로 선택
-            group.sort(key=lambda x: min(x.get("frame_indices", [0])))
-            query_done = False
+        single_cam_ids = []
+        for gid, cam_dict in tqdm(by_gid.items(), desc="Test/Query"):
+            n_cams = len(cam_dict)
+            if n_cams < 2:
+                single_cam_ids.append(gid)
 
-            for t in group:
-                tdir = Path(t["tracklet_dir"])
-                slot = self._extract_number(t.get("time_slot", 0))
-                crop_files = sorted(t.get("crop_files", []))
-                if not crop_files:
-                    continue
-
-                mid = len(crop_files) // 2
-                for idx, fname in enumerate(crop_files):
-                    src_path = tdir / fname
-                    if not src_path.exists():
-                        continue
-                    frame_num = self._parse_frame_num(fname)
-                    dst_name = f"{gid:04d}_c{cam}s{slot}_{frame_num:06d}_00.jpg"
-
-                    if not query_done and idx == mid:
-                        shutil.copy2(src_path, query_out / dst_name)
-                        stats["copied_query_images"] += 1
-                        query_done = True
-                    else:
+            for cam, group in cam_dict.items():
+                # 전체 이미지 → gallery
+                group.sort(key=lambda x: min(x.get("frame_indices", [0])))
+                for t in group:
+                    tdir = Path(t["tracklet_dir"])
+                    slot = self._extract_number(t.get("time_slot", 0))
+                    for fname in sorted(t.get("crop_files", [])):
+                        src_path = tdir / fname
+                        if not src_path.exists():
+                            continue
+                        frame_num = self._parse_frame_num(fname)
+                        dst_name = f"{gid:04d}_c{cam}s{slot}_{frame_num:06d}_00.jpg"
                         shutil.copy2(src_path, test_out / dst_name)
                         stats["copied_test_images"] += 1
+
+                # query: 2개 이상 카메라 등장 인물만 선발, 첫 트랙렛 중간 프레임 1장
+                if n_cams >= 2:
+                    first_t = group[0]
+                    tdir = Path(first_t["tracklet_dir"])
+                    slot = self._extract_number(first_t.get("time_slot", 0))
+                    crop_files = sorted(first_t.get("crop_files", []))
+                    if crop_files:
+                        fname = crop_files[len(crop_files) // 2]
+                        src_path = tdir / fname
+                        if src_path.exists():
+                            frame_num = self._parse_frame_num(fname)
+                            dst_name = f"{gid:04d}_c{cam}s{slot}_{frame_num:06d}_00.jpg"
+                            shutil.copy2(src_path, query_out / dst_name)
+                            stats["copied_query_images"] += 1
+
+        if single_cam_ids:
+            print(f"[WARN] 단일 카메라 등장 ID {len(single_cam_ids)}개는 query 미선발 "
+                  f"(gallery에만 포함): {single_cam_ids}")
 
         print(f"[INFO] Market-1501 데이터셋 변환 성공: {self.output_dir}")
         return stats
