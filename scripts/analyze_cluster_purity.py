@@ -11,7 +11,7 @@ scripts/analyze_cluster_purity.py
 사용법:
     python scripts/analyze_cluster_purity.py --config configs/config.yaml
     python scripts/analyze_cluster_purity.py --config configs/config.yaml \\
-        --sim-threshold 0.6 --out output/purity_report.json
+        --sim-threshold 0.6 --out outputs/purity_report.json
 """
 
 from __future__ import annotations
@@ -156,8 +156,8 @@ def main():
                         help="filtered 데이터 경로 (미지정 시 config에서 읽음)")
     parser.add_argument("--sim-threshold", type=float, default=0.6,
                         help="cosine 유사도 하한 — 이 미만 쌍을 오병합으로 간주 (기본: 0.6)")
-    parser.add_argument("--out", default="output/purity_report.json",
-                        help="결과 JSON 저장 경로 (기본: output/purity_report.json)")
+    parser.add_argument("--out", default="outputs/purity_report.json",
+                        help="결과 JSON 저장 경로 (기본: outputs/purity_report.json)")
     args = parser.parse_args()
 
     config_path = Path(args.config)

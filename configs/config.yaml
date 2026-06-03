@@ -7,7 +7,7 @@ data:
   video_dir: "data/raw_videos"
   frame_dir: "data/frames"
   tracklet_dir: "data/tracklets"
-  filtered_dir: "data/filtered-v1"
+  filtered_dir: "data/curated"
 
 # --- 영상 파일 → (camera_id, time_slot) 매핑 ---
 # 영상 파일 확장자가 다르면(.avi/.mov/.mkv) 키를 그대로 바꾸세요.
@@ -107,4 +107,4 @@ market1501:
 evaluation:
   batch_size: 64
   top_k: [1, 5, 10]
-  output_dir: "data/eval_results"
+  output_dir: "outputs/eval_results"

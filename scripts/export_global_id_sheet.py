@@ -3,7 +3,7 @@ global_id에 해당하는 모든 트랙렛의 썸네일을 하나의 이미지(s
 
 사용법:
     python scripts/export_global_id_sheet.py <global_id> [--filtered-dir data/filtered]
-                                                          [--out output/sheets]
+                                                          [--out outputs/sheets]
                                                           [--thumb-size 80]
                                                           [--cols 10]
 """
@@ -146,8 +146,8 @@ def main():
     parser.add_argument("global_id", type=int, help="조회할 Global ID")
     parser.add_argument("--filtered-dir", default="data/filtered",
                         help="filtered 데이터 루트 경로 (기본: data/filtered)")
-    parser.add_argument("--out", default="output/sheets",
-                        help="출력 디렉토리 (기본: output/sheets)")
+    parser.add_argument("--out", default="outputs/sheets",
+                        help="출력 디렉토리 (기본: outputs/sheets)")
     parser.add_argument("--thumb-size", type=int, default=80,
                         help="썸네일 너비 px (기본: 80)")
     parser.add_argument("--cols", type=int, default=10,
