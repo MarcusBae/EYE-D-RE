@@ -83,7 +83,7 @@ runtime:
 
 # --- Cross-camera ID 병합 (Phase 1E) ---
 reid:
-  model_name: "osnet_x1_0" # OSNet 백본 모델 크기 (osnet_x1_0, osnet_x0_75 등)
+  model_name: "osnet_x1_0" # OSNet 백본 모델 크기 (osnet_x1_0, osnet_ain_x1_0 등)
   pretrained: true
   # Re-ID pretrained 가중치 파일 경로 (null이면 ImageNet pretrained 사용)
   # Market-1501 가중치 다운로드:
