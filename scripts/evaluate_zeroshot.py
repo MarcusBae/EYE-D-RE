@@ -6,6 +6,9 @@ Phase 2: 사전학습된 OSNet으로 Market-1501 포맷 데이터셋을 Zero-sho
 
 실행 예:
   python scripts/evaluate_zeroshot.py --config configs/config.yaml
+  python scripts/evaluate_zeroshot.py --config configs/config.yaml --matching mean
+  python scripts/evaluate_zeroshot.py --config configs/config.yaml --rerank
+  python scripts/evaluate_zeroshot.py --config configs/config.yaml --matching mean --rerank
 """
 
 from __future__ import annotations
@@ -20,12 +23,24 @@ if str(project_root) not in sys.path:
     sys.path.append(str(project_root))
 
 from pipeline.reid_merger import OSNetExtractor
-from pipeline.evaluator import MarketEvaluator
+from pipeline.evaluator import MarketEvaluator, MATCHING_STRATEGIES
 
 
 def main():
     parser = argparse.ArgumentParser(description="EYE-D — Phase 2 Zero-shot Evaluation")
     parser.add_argument("--config", type=str, default="configs/config.yaml")
+    parser.add_argument(
+        "--matching",
+        type=str,
+        default="single",
+        choices=MATCHING_STRATEGIES,
+        help=f"Matching 전략 (기본: single). 선택: {MATCHING_STRATEGIES}",
+    )
+    parser.add_argument(
+        "--rerank",
+        action="store_true",
+        help="k-reciprocal re-ranking 후처리 적용 (k1=20, k2=6, λ=0.3)",
+    )
     args = parser.parse_args()
 
     config_path = Path(args.config)
@@ -41,11 +56,13 @@ def main():
     print("=" * 55)
     print("  Phase 2: Zero-shot Re-ID Evaluation")
     print("=" * 55)
-    print(f"  모델  : {reid_cfg.get('model_name', 'osnet_x1_0')} (pretrained)")
-    print(f"  데이터: {config.get('market1501', {}).get('output_dir', 'data/market1501')}")
+    print(f"  모델    : {reid_cfg.get('model_name', 'osnet_x1_0')}")
+    print(f"  가중치  : {reid_cfg.get('weights_path') or 'ImageNet pretrained'}")
+    print(f"  Matching: {args.matching}")
+    print(f"  Re-rank : {'on' if args.rerank else 'off'}")
+    print(f"  데이터  : {config.get('market1501', {}).get('output_dir', 'data/market1501')}")
     print("=" * 55)
 
-    # OSNet 로드
     try:
         extractor = OSNetExtractor(
             model_name=reid_cfg.get("model_name", "osnet_x1_0"),
@@ -53,26 +70,25 @@ def main():
             weights_path=reid_cfg.get("weights_path", None),
             device=reid_cfg.get("device", "auto"),
         )
-    except RuntimeError as e:
+    except (RuntimeError, FileNotFoundError) as e:
         print(f"[ERROR] 모델 로드 실패: {e}")
         sys.exit(1)
 
-    # 평가 실행
     evaluator = MarketEvaluator(config)
-    results = evaluator.run(extractor)
+    results = evaluator.run(extractor, matching=args.matching, rerank=args.rerank)
 
-    # 결과 출력
     print()
     print("=" * 55)
-    print("  평가 결과 (Zero-shot)")
+    print(f"  평가 결과 — matching={args.matching}")
     print("=" * 55)
-    print(f"  Query   : {results['num_query']}장 / {results['num_query_ids']}개 ID")
-    print(f"  Gallery : {results['num_gallery']}장")
+    print(f"  Query   : {results['num_query']}개 / {results['num_query_ids']}개 ID")
+    print(f"  Gallery : {results['num_gallery']}개")
     print(f"  mAP     : {results['mAP']:.2f}%")
     for rank_key, val in results["CMC"].items():
         print(f"  {rank_key:<8}: {val:.2f}%")
     print("=" * 55)
-    print(f"  결과 저장: {evaluator.output_dir / 'zeroshot_results.json'}")
+    suffix = f"{args.matching}_rerank" if args.rerank else args.matching
+    print(f"  결과 저장: {evaluator.output_dir / f'results_{suffix}.json'}")
 
 
 if __name__ == "__main__":
