@@ -1,4 +1,5 @@
 import os, glob, re, argparse
+import torch
 from torchreid.reid.data import ImageDataManager, register_image_dataset
 from torchreid.reid.engine import ImageTripletEngine
 from torchreid.reid import models, optim
@@ -8,7 +9,7 @@ try:
 except Exception:
     from torchreid.reid.data.datasets import ImageDataset
 
-DATA_ROOT = "/home/murim/EYE-D-RE/data/market1501-v1"
+DATA_ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "market1501-v1")
 MARKET_W = os.path.expanduser("~/.cache/torch/checkpoints/osnet_x1_0_market.pth")
 _PAT = re.compile(r'([-\d]+)_c(\d+)')
 
@@ -33,23 +34,26 @@ def main():
     ap.add_argument('--lr', type=float, default=0.0005)
     ap.add_argument('--save-dir', type=str, default='log/ft9_osnet_lastblock')
     a = ap.parse_args()
+    use_gpu = torch.cuda.is_available()
+    print("[INFO] use_gpu =", use_gpu)
     dm = ImageDataManager(root='', sources='eyed', targets='eyed', height=256, width=128,
         batch_size_train=a.batch, batch_size_test=64,
         transforms=['random_flip','random_crop','random_erase'],
-        train_sampler='RandomIdentitySampler', num_instances=4)
+        train_sampler='RandomIdentitySampler', num_instances=4, use_gpu=use_gpu)
     print(f"[INFO] train IDs={dm.num_train_pids}")
-    model = models.build_model('osnet_x1_0', dm.num_train_pids, loss='triplet', pretrained=False)
+    model = models.build_model('osnet_x1_0', dm.num_train_pids, loss='triplet', pretrained=False, use_gpu=use_gpu)
     load_pretrained_weights(model, MARKET_W)
     n=0
     for name,p in model.named_parameters():
         p.requires_grad = name.startswith(('conv5','fc','classifier'))
         if p.requires_grad: n+=p.numel()
     print(f"[INFO] 학습 파라미터(마지막 블록): {n:,}")
-    model = model.cuda()
+    if use_gpu:
+        model = model.cuda()
     opt = optim.build_optimizer(model, optim='adam', lr=a.lr)
     sch = optim.build_lr_scheduler(opt, lr_scheduler='cosine', max_epoch=a.epochs)
     eng = ImageTripletEngine(dm, model, optimizer=opt, scheduler=sch,
-        margin=0.3, weight_t=1.0, weight_x=1.0, label_smooth=True)
+        margin=0.3, weight_t=1.0, weight_x=1.0, label_smooth=True, use_gpu=use_gpu)
     eng.run(save_dir=a.save_dir, max_epoch=a.epochs, eval_freq=a.epochs, print_freq=20, test_only=False)
     print(f"[DONE] {a.save_dir}/model/model.pth.tar-{a.epochs}")
 
