@@ -873,12 +873,12 @@ AP = (1/R) × Σ [ precision@k × relevant(k) ]
 | **⑧-a** | OSNet-AIN x1.0 | ImageNet | — | Single | 38.71% | 61.29% | 83.87% | 27.05% | 31 / 13 ID | 430장 | done |
 | **⑧-b** | OSNet-AIN x1.0 | ImageNet | — | Mean Pooling | 45.16% | 77.42% | 96.77% | 49.29% | 31 / 13 ID | 49트랙렛 | done |
 | **⑧-c** | OSNet-AIN x1.0 | ImageNet | Re-ranking | Mean Pooling | 48.39% | 74.19% | 87.10% | 52.09% | 31 / 13 ID | 49트랙렛 | done |
-| **⑧-d** | OSNet-AIN x1.0 | Market-1501 | — | Single | — | — | — | — | — | — | - |
-| **⑧-e** | OSNet-AIN x1.0 | Market-1501 | — | Mean Pooling | — | — | — | — | — | — | - |
-| **⑧-f** | OSNet-AIN x1.0 | Market-1501 | Re-ranking | Mean Pooling | — | — | — | — | — | — | - |
-| **⑨** | OSNet x1.0 | 파인튜닝 (마지막 블록) | Re-ranking | Mean Pooling | — | — | — | — | — | — | — |
+| **⑧-d** | OSNet-AIN x1.0 | Market-1501 | — | Single | 74.19% | 90.32% | 90.32% | 58.30% | 31 / 13 ID | 430장 | done |
+| **⑧-e** | OSNet-AIN x1.0 | Market-1501 | — | Mean Pooling | 67.74% | 93.55% | 96.77% | 72.30% | 31 / 13 ID | 49트랙렛 | done |
+| **⑧-f** | OSNet-AIN x1.0 | Market-1501 | Re-ranking | Mean Pooling | **74.19%** | **93.55%** | **93.55%** | **79.37%** | 31 / 13 ID | 49트랙렛 | **done (최우수)** |
+| **⑨** | OSNet x1.0 | 파인튜닝 (마지막 블록) | Re-ranking | Mean Pooling | 54.84% | 83.87% | 87.10% | 59.68% | 31 / 13 ID | 49트랙렛 | done |
 | **⑩** | OSNet x1.0 | 파인튜닝 (전체) | Re-ranking | Mean Pooling | — | — | — | — | — | — | — |
-| **⑪** | OSNet-AIN x1.0 | 파인튜닝 | Re-ranking | Conf-weighted | — | — | — | — | — | — | — |
+| **⑪** | OSNet-AIN x1.0 | 파인튜닝 | Re-ranking | Conf-weighted | 54.84% | 80.65% | 96.77% | 63.83% | 31 / 13 ID | 49트랙렛 | done |
 | **⑫** | OSNet x1.0 | 파인튜닝 | Re-ranking | Conf-weighted | — | — | — | — | — | — | — |
 | **⑬** | TransReID | 파인튜닝 | Re-ranking | Conf-weighted | — | — | — | — | — | — | — |
 
