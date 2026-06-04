@@ -1,0 +1,343 @@
+"""
+scripts/demo_preprocess.py
+===========================
+데모용 사전 처리 스크립트.
+
+[모드 1] 기존 트랙렛 사용 (빠름)
+    python scripts/demo_preprocess.py --config configs/config.yaml
+    python scripts/demo_preprocess.py --config configs/config.yaml --slots c1_t4 c2_t4
+
+[모드 2] 새 동영상 파일에서 전체 파이프라인 실행
+    python scripts/demo_preprocess.py --config configs/config.yaml \
+        --videos data/raw_videos/cam1_t4.avi data/raw_videos/cam2_t4.avi
+
+    파이프라인: 영상 → 트래킹 → 품질 필터 → Re-ID 특징 추출 → 매칭 → demo_data
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import shutil
+import sys
+import tempfile
+from datetime import datetime, timedelta
+from pathlib import Path
+
+import cv2
+import numpy as np
+from tqdm import tqdm
+
+project_root = Path(__file__).resolve().parent.parent
+sys.path.append(str(project_root))
+
+from pipeline.reid_merger import OSNetExtractor
+from pipeline.tracklet_io import list_tracklets
+
+# 슬롯 번호 → 촬영 시작 시각
+SLOT_START = {
+    1: "12:00:00", 2: "12:30:00", 3: "13:00:00",
+    4: "13:30:00", 5: "14:00:00", 6: "14:30:00",
+    7: "15:00:00", 8: "15:30:00", 9: "16:00:00", 10: "16:30:00",
+}
+
+
+# ── 유틸 ──────────────────────────────────────────────────────────
+
+def frame_to_timestamp(frame_idx: int, fps: float, slot: int) -> str:
+    start = datetime.strptime(SLOT_START.get(slot, "00:00:00"), "%H:%M:%S")
+    ts = start + timedelta(seconds=frame_idx / fps)
+    return ts.strftime("%H:%M:%S")
+
+
+def pick_thumbnail(tdir: Path, crop_files: list) -> Path | None:
+    mid = crop_files[len(crop_files) // 2]
+    p = tdir / mid
+    return p if p.exists() else None
+
+
+def build_appearance(tdir: Path, meta: dict) -> dict:
+    fps = meta.get("src_fps", 24.0)
+    slot = meta.get("time_slot", 0)
+    cam = meta.get("camera_id", 0)
+    crops = meta.get("crop_files", [])
+    frames = meta.get("frame_indices", [])
+    start_t = frame_to_timestamp(frames[0], fps, slot) if frames else "??:??:??"
+    end_t   = frame_to_timestamp(frames[-1], fps, slot) if frames else "??:??:??"
+    return {
+        "camera": cam,
+        "slot": slot,
+        "start_time": start_t,
+        "end_time": end_t,
+        "tracklet_dir": str(tdir),
+        "crop_files": crops,
+        "num_frames": len(crops),
+    }
+
+
+# ── 모드 2: 영상 → 트랙렛 ────────────────────────────────────────
+
+def get_video_cam_slot(video_path: Path, config: dict) -> tuple[int, int] | None:
+    """config.yaml videos 섹션에서 파일명으로 (camera_id, time_slot) 조회."""
+    name = video_path.name
+    for vname, info in config.get("videos", {}).items():
+        if vname == name:
+            return info["camera"], info["slot"]
+    return None
+
+
+def run_tracking(video_path: Path, camera_id: int, time_slot: int,
+                 config: dict, out_dir: Path, frame_stride: int = 6) -> Path:
+    """영상 1개를 트래킹해 out_dir/{cam_slot}/ 에 트랙렛 저장."""
+    from pipeline.tracker import PersonTracker
+    det_cfg = config.get("detection", {})
+    trk_cfg = config.get("tracking", {})
+    tracker = PersonTracker(
+        model_path=det_cfg.get("model", "yolov8n.pt"),
+        tracker_yaml=trk_cfg.get("tracker_yaml", "configs/botsort.yaml"),
+        conf=det_cfg.get("conf_threshold", 0.5),
+        iou=det_cfg.get("iou_threshold", 0.45),
+        imgsz=det_cfg.get("imgsz", 640),
+        classes=det_cfg.get("classes", [0]),
+        device=det_cfg.get("device", "auto"),
+    )
+    print(f"  [트래킹] {video_path.name}  (cam={camera_id}, slot={time_slot})")
+    tracker.track_video(
+        video_path=str(video_path),
+        camera_id=camera_id,
+        time_slot=time_slot,
+        output_dir=str(out_dir),
+        frame_stride=frame_stride,
+        save_crops=True,
+    )
+    return out_dir / f"c{camera_id}_t{time_slot}"
+
+
+def run_quality_filter(tracklet_dir: Path, filtered_dir: Path, config: dict) -> Path:
+    """품질 필터를 적용해 통과한 트랙렛만 filtered_dir 에 복사."""
+    from pipeline.quality_filter import TrackletQualityFilter
+    qf_cfg = config.get("quality_filter", {})
+    filt = TrackletQualityFilter(
+        min_length=qf_cfg.get("min_track_length", 6),
+        min_avg_conf=qf_cfg.get("min_avg_confidence", 0.7),
+        min_bbox_h=qf_cfg.get("min_bbox_height", 64),
+        min_bbox_w=qf_cfg.get("min_bbox_width", 32),
+        max_aspect_ratio=qf_cfg.get("max_aspect_ratio", 4.0),
+        min_area=qf_cfg.get("min_bbox_area", 2048),
+    )
+    filtered_dir.mkdir(parents=True, exist_ok=True)
+    stats = filt.filter_all(
+        tracklet_dir=str(tracklet_dir),
+        output_dir=str(filtered_dir),
+        copy_crops=True,
+        verbose=False,
+    )
+    passed = stats.get("passed", 0)
+    total  = stats.get("total", 0)
+    print(f"  [필터] {tracklet_dir.name}: {passed}/{total}개 통과")
+    return filtered_dir
+
+
+def run_matching(tracklets: list, feats: np.ndarray, threshold: float) -> list:
+    """HAC 클러스터링으로 person_id 배정."""
+    from scipy.cluster.hierarchy import fclusterdata
+    norms = np.linalg.norm(feats, axis=1, keepdims=True)
+    feats_norm = feats / np.maximum(norms, 1e-8)
+    labels = fclusterdata(feats_norm, t=threshold,
+                          criterion="distance", metric="cosine", method="average")
+    return [int(l) for l in labels]
+
+
+# ── 공통: 특징 추출 ───────────────────────────────────────────────
+
+def extract_features(tracklets: list, extractor: OSNetExtractor) -> np.ndarray:
+    feats = []
+    for t in tqdm(tracklets, desc="  특징 추출"):
+        tdir  = Path(t["tracklet_dir"])
+        crops = t.get("crop_files", [])
+        max_n = 8
+        if len(crops) > max_n:
+            idx   = np.linspace(0, len(crops) - 1, max_n, dtype=int)
+            crops = [crops[i] for i in idx]
+        imgs = [cv2.imread(str(tdir / c)) for c in crops]
+        imgs = [img for img in imgs if img is not None]
+        if imgs:
+            f = extractor.extract_batch_features(imgs)
+            feats.append(f.mean(axis=0))
+        else:
+            feats.append(np.zeros(512, dtype=np.float32))
+    return np.array(feats)
+
+
+# ── demo_data 저장 ────────────────────────────────────────────────
+
+def save_demo_data(tracklets: list, person_ids: list, feats: np.ndarray,
+                   out_dir: Path, tracklet_root: str):
+    persons: dict[int, dict] = {}
+    for t, pid, feat in zip(tracklets, person_ids, feats):
+        if pid not in persons:
+            persons[pid] = {"id": pid, "appearances": [],
+                            "feat_sum": np.zeros(512), "feat_count": 0}
+        persons[pid]["appearances"].append(build_appearance(Path(t["tracklet_dir"]), t))
+        persons[pid]["feat_sum"] += feat
+        persons[pid]["feat_count"] += 1
+
+    manifest_persons = []
+    for pid, info in sorted(persons.items()):
+        crop_dir = out_dir / "crops" / f"{pid:04d}"
+        crop_dir.mkdir(parents=True, exist_ok=True)
+
+        thumb_dst = None
+        for app in info["appearances"]:
+            tdir = Path(app["tracklet_dir"])
+            if app["crop_files"]:
+                src = pick_thumbnail(tdir, app["crop_files"])
+                if src and src.exists():
+                    thumb_dst = str((crop_dir / "thumb.jpg").resolve())
+                    shutil.copy2(src, thumb_dst)
+                    break
+
+        mean_feat = info["feat_sum"] / max(info["feat_count"], 1)
+        norm = np.linalg.norm(mean_feat)
+        if norm > 0:
+            mean_feat /= norm
+        np.save(str(crop_dir / "feature.npy"), mean_feat)
+
+        manifest_persons.append({
+            "id": pid,
+            "thumb": thumb_dst,
+            "appearances": info["appearances"],
+        })
+
+    manifest = {
+        "tracklet_root": tracklet_root,
+        "num_persons": len(manifest_persons),
+        "persons": manifest_persons,
+    }
+    path = out_dir / "manifest.json"
+    path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    return manifest_persons
+
+
+# ── main ──────────────────────────────────────────────────────────
+
+def main():
+    import yaml
+
+    parser = argparse.ArgumentParser(description="EYE-D 데모 사전 처리")
+    parser.add_argument("--config", default="configs/config.yaml")
+    parser.add_argument("--videos", nargs="*", default=None,
+                        help="[모드 2] 동영상 파일 경로 목록 (전체 파이프라인 실행)")
+    parser.add_argument("--tracklets-dir", default=None,
+                        help="[모드 1] 트랙렛 루트 (미지정 시 config.filtered_dir)")
+    parser.add_argument("--slots", nargs="*", default=None,
+                        help="[모드 1] 사용할 슬롯 (예: c1_t4 c2_t4)")
+    parser.add_argument("--frame-stride", type=int, default=6,
+                        help="[모드 2] 트래킹 프레임 간격 (기본: 6)")
+    parser.add_argument("--threshold", type=float, default=0.30,
+                        help="매칭 임계값 — global_id 없을 때 사용 (기본: 0.30)")
+    parser.add_argument("--out", default="data/demo_data")
+    args = parser.parse_args()
+
+    with open(args.config, encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+
+    reid_cfg   = config.get("reid", {})
+    out_dir    = Path(args.out)
+
+    # 출력 폴더 초기화
+    if out_dir.exists():
+        ans = input(f"[WARN] '{out_dir}' 이미 존재합니다. 삭제하고 새로 생성할까요? [y/N] ").strip().lower()
+        if ans != "y":
+            print("취소")
+            sys.exit(0)
+        shutil.rmtree(out_dir)
+    out_dir.mkdir(parents=True)
+    (out_dir / "crops").mkdir()
+
+    # Re-ID 특징 추출기 로드
+    extractor = OSNetExtractor(
+        model_name=reid_cfg.get("model_name", "osnet_x1_0"),
+        pretrained=reid_cfg.get("pretrained", True),
+        weights_path=reid_cfg.get("weights_path"),
+        device=reid_cfg.get("device", "auto"),
+    )
+
+    # ── 모드 분기 ──────────────────────────────────────────────────
+    if args.videos:
+        # ── 모드 2: 영상 파일 → 전체 파이프라인 ──────────────────
+        print("[INFO] 모드 2: 영상 파일에서 전체 파이프라인 실행")
+        video_paths = [Path(v) for v in args.videos]
+
+        for vp in video_paths:
+            if not vp.exists():
+                sys.exit(f"[ERROR] 영상 파일 없음: {vp}")
+            info = get_video_cam_slot(vp, config)
+            if info is None:
+                sys.exit(f"[ERROR] '{vp.name}' 이 configs/config.yaml videos 섹션에 없습니다.")
+
+        tmp_track  = out_dir / "_tracklets"
+        tmp_filter = out_dir / "_filtered"
+
+        print("\n[STEP 1] 트래킹")
+        for vp in video_paths:
+            cam, slot = get_video_cam_slot(vp, config)
+            run_tracking(vp, cam, slot, config, tmp_track, args.frame_stride)
+
+        print("\n[STEP 2] 품질 필터")
+        for slot_dir in sorted(tmp_track.iterdir()):
+            if slot_dir.is_dir():
+                run_quality_filter(slot_dir, tmp_filter / slot_dir.name, config)
+
+        tracklet_root = str(tmp_filter)
+
+    else:
+        # ── 모드 1: 기존 트랙렛 사용 ─────────────────────────────
+        print("[INFO] 모드 1: 기존 트랙렛 사용")
+        tracklet_root = args.tracklets_dir or config["data"]["filtered_dir"]
+
+    print(f"\n[INFO] 트랙렛 경로: {tracklet_root}")
+
+    # 트랙렛 로드 (슬롯 필터)
+    tracklets = list_tracklets(tracklet_root)
+    if args.slots and not args.videos:
+        tracklets = [t for t in tracklets
+                     if Path(t["tracklet_dir"]).parent.name in args.slots]
+    if not tracklets:
+        sys.exit("[ERROR] 트랙렛이 없습니다.")
+    print(f"[INFO] 트랙렛 {len(tracklets)}개")
+
+    # 특징 추출
+    print("\n[STEP 3] Re-ID 특징 추출")
+    feats = extract_features(tracklets, extractor)
+
+    # person_id 결정
+    has_global_id = all(t.get("global_id") is not None for t in tracklets)
+    if has_global_id and not args.videos:
+        print("[INFO] 기존 global_id 사용")
+        person_ids = [t["global_id"] for t in tracklets]
+    else:
+        print(f"[INFO] HAC 클러스터링 (threshold={args.threshold})")
+        person_ids = run_matching(tracklets, feats, args.threshold)
+
+    # demo_data 저장
+    print("\n[STEP 4] demo_data 저장")
+    persons = save_demo_data(tracklets, person_ids, feats, out_dir, tracklet_root)
+
+    # 임시 폴더 정리 (모드 2)
+    if args.videos:
+        shutil.rmtree(out_dir / "_tracklets", ignore_errors=True)
+        shutil.rmtree(out_dir / "_filtered", ignore_errors=True)
+
+    print()
+    print("=" * 50)
+    print(f"  완료: {len(persons)}명 / {len(tracklets)}개 트랙렛")
+    print(f"  저장: {(out_dir / 'manifest.json').resolve()}")
+    print("=" * 50)
+    print()
+    print("앱 실행:")
+    print(f"  streamlit run scripts/demo_app.py")
+
+
+if __name__ == "__main__":
+    main()
