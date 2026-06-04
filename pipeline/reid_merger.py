@@ -89,6 +89,8 @@ class OSNetExtractor:
                 state = state["state_dict"]
             elif "model" in state:
                 state = state["model"]
+            # module. 프리픽스 제거 (DataParallel 저장 체크포인트 대응)
+            state = {k[7:] if k.startswith("module.") else k: v for k, v in state.items()}
             # shape mismatch(classifier 클래스 수 등) 키 제외 후 로드
             model_state = model.state_dict()
             compatible = {k: v for k, v in state.items()
