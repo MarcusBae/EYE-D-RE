@@ -12,35 +12,35 @@ data:
 # --- 영상 파일 → (camera_id, time_slot) 매핑 ---
 # 영상 파일 확장자가 다르면(.avi/.mov/.mkv) 키를 그대로 바꾸세요.
 videos:
-  cam1_t1.avi: {camera: 1, slot: 1}
-  cam2_t1.avi: {camera: 2, slot: 1}
-  cam3_t1.avi: {camera: 3, slot: 1}
-  cam2_t2.avi: {camera: 2, slot: 2}
-  cam3_t2.avi: {camera: 3, slot: 2}
-  cam1_t3.avi: {camera: 1, slot: 3}
-  cam2_t3.avi: {camera: 2, slot: 3}
-  cam3_t3.avi: {camera: 3, slot: 3}
-  cam1_t4.avi: {camera: 1, slot: 4}
-  cam2_t4.avi: {camera: 2, slot: 4}
-  cam3_t4.avi: {camera: 3, slot: 4}
-  cam1_t5.avi: {camera: 1, slot: 5}
-  cam2_t5.avi: {camera: 2, slot: 5}
-  cam3_t5.avi: {camera: 3, slot: 5}
-  cam1_t6.avi: {camera: 1, slot: 6}
-  cam2_t6.avi: {camera: 2, slot: 6}
-  cam3_t6.avi: {camera: 3, slot: 6}
-  cam1_t7.avi: {camera: 1, slot: 7}
-  cam2_t7.avi: {camera: 2, slot: 7}
-  cam3_t7.avi: {camera: 3, slot: 7}
-  cam1_t8.avi: {camera: 1, slot: 8}
-  cam2_t8.avi: {camera: 2, slot: 8}
-  cam3_t8.avi: {camera: 3, slot: 8}
-  cam1_t9.avi: {camera: 1, slot: 9}
-  cam2_t9.avi: {camera: 2, slot: 9}
-  cam3_t9.avi: {camera: 3, slot: 9}
-  cam1_t10.avi: {camera: 1, slot: 10}
-  cam2_t10.avi: {camera: 2, slot: 10}
-  cam3_t10.avi: {camera: 3, slot: 10}
+  cam1_t1.avi:  {camera: 1, slot: 1,  start_time: "12:01:20"}
+  cam2_t1.avi:  {camera: 2, slot: 1,  start_time: "12:03:22"}
+  cam3_t1.avi:  {camera: 3, slot: 1,  start_time: "12:00:23"}
+  cam2_t2.avi:  {camera: 2, slot: 2,  start_time: "12:43:22"}
+  cam3_t2.avi:  {camera: 3, slot: 2,  start_time: "12:38:00"}
+  cam1_t3.avi:  {camera: 1, slot: 3,  start_time: "13:16:17"}
+  cam2_t3.avi:  {camera: 2, slot: 3,  start_time: "13:19:17"}
+  cam3_t3.avi:  {camera: 3, slot: 3,  start_time: "13:00:00"}
+  cam1_t4.avi:  {camera: 1, slot: 4,  start_time: "13:40:11"}
+  cam2_t4.avi:  {camera: 2, slot: 4,  start_time: "13:40:01"}
+  cam3_t4.avi:  {camera: 3, slot: 4,  start_time: "13:30:49"}
+  cam1_t5.avi:  {camera: 1, slot: 5,  start_time: "14:10:20"}
+  cam2_t5.avi:  {camera: 2, slot: 5,  start_time: "14:09:58"}
+  cam3_t5.avi:  {camera: 3, slot: 5,  start_time: "14:06:07"}
+  cam1_t6.avi:  {camera: 1, slot: 6,  start_time: "14:42:30"}
+  cam2_t6.avi:  {camera: 2, slot: 6,  start_time: "14:40:55"}
+  cam3_t6.avi:  {camera: 3, slot: 6,  start_time: "14:32:18"}
+  cam1_t7.avi:  {camera: 1, slot: 7,  start_time: "15:02:34"}
+  cam2_t7.avi:  {camera: 2, slot: 7,  start_time: "15:06:52"}
+  cam3_t7.avi:  {camera: 3, slot: 7,  start_time: "15:00:00"}
+  cam1_t8.avi:  {camera: 1, slot: 8,  start_time: "15:30:00"}
+  cam2_t8.avi:  {camera: 2, slot: 8,  start_time: "15:34:47"}
+  cam3_t8.avi:  {camera: 3, slot: 8,  start_time: "15:30:00"}
+  cam1_t9.avi:  {camera: 1, slot: 9,  start_time: "16:00:00"}
+  cam2_t9.avi:  {camera: 2, slot: 9,  start_time: "16:00:01"}
+  cam3_t9.avi:  {camera: 3, slot: 9,  start_time: "16:00:00"}
+  cam1_t10.avi: {camera: 1, slot: 10, start_time: "16:30:00"}
+  cam2_t10.avi: {camera: 2, slot: 10, start_time: "16:30:01"}
+  cam3_t10.avi: {camera: 3, slot: 10, start_time: "16:30:00"}
 
 # --- 프레임 추출 ---
 frame_extraction:
@@ -51,7 +51,7 @@ frame_extraction:
 # --- 검출 (YOLOv8n) ---
 detection:
   model: "yolov8n.pt" # nano (최경량, 빠름)
-  conf_threshold: 0.5
+  conf_threshold: 0.55
   iou_threshold: 0.45
   classes: [0] # COCO class 0 = person
   imgsz: 640

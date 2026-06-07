@@ -1,17 +1,50 @@
 """
 scripts/demo_preprocess.py
 ===========================
-데모용 사전 처리 스크립트.
+demo_app.py 가 읽는 data/demo_data/ 를 생성하는 전처리 스크립트.
 
-[모드 1] 기존 트랙렛 사용 (빠름)
+출력물
+  data/demo_data/
+  ├── manifest.json          인물별 등장 구간·썸네일 경로 목록
+  └── crops/{pid:04d}/
+      ├── thumb.jpg          대표 썸네일 (중앙 프레임)
+      └── feature.npy        OSNet 512-d 평균 특징 벡터
+
+타임스탬프 계산
+  각 프레임의 절대 시각 = configs/config.yaml videos[파일명].start_time
+                          + frame_index / src_fps
+  start_time 은 파일마다 다를 수 있으므로 반드시 config 를 먼저 수정한 뒤 실행.
+
+──────────────────────────────────────────────────────────────
+[모드 1] 기존 트랙렛 사용 (빠름, 권장)
+  data/curated/ 가 이미 준비된 상태에서 manifest 만 (재)생성할 때 사용.
+
+    # 전체 슬롯 처리
     python scripts/demo_preprocess.py --config configs/config.yaml
-    python scripts/demo_preprocess.py --config configs/config.yaml --slots c1_t4 c2_t4
 
-[모드 2] 새 동영상 파일에서 전체 파이프라인 실행
+    # 특정 슬롯만 처리 (cam_slot 폴더명 기준)
     python scripts/demo_preprocess.py --config configs/config.yaml \
-        --videos data/raw_videos/cam1_t4.avi data/raw_videos/cam2_t4.avi
+        --slots c1_t8 c2_t8 c3_t8
 
-    파이프라인: 영상 → 트래킹 → 품질 필터 → Re-ID 특징 추출 → 매칭 → demo_data
+──────────────────────────────────────────────────────────────
+[모드 2] 새 영상 파일에서 전체 파이프라인 실행
+  영상 파일을 직접 지정하면 트래킹 → 품질 필터 → Re-ID → 매칭까지 자동 수행.
+  처리 완료 후 임시 폴더(_tracklets, _filtered)는 자동 삭제됨.
+
+    python scripts/demo_preprocess.py --config configs/config.yaml \
+        --videos data/raw_videos/cam1_t8.avi \
+                 data/raw_videos/cam2_t8.avi \
+                 data/raw_videos/cam3_t8.avi
+
+──────────────────────────────────────────────────────────────
+주요 옵션
+  --config   configs/config.yaml 경로 (기본: configs/config.yaml)
+  --data     출력 루트 (기본: data/demo_data)
+  --tracklets  트랙렛 소스 디렉터리 (기본: data/curated)
+  --slots    처리할 cam_slot 폴더 이름 목록 (모드 1, 미지정 시 전체)
+  --videos   처리할 영상 파일 경로 목록 (모드 2)
+  --threshold  HAC 병합 임계값 cosine distance (기본: config 값)
+  --force    기존 demo_data 를 지우고 재생성
 """
 
 from __future__ import annotations
@@ -34,18 +67,20 @@ sys.path.append(str(project_root))
 from pipeline.reid_merger import OSNetExtractor
 from pipeline.tracklet_io import list_tracklets
 
-# 슬롯 번호 → 촬영 시작 시각
-SLOT_START = {
-    1: "12:00:00", 2: "12:30:00", 3: "13:00:00",
-    4: "13:30:00", 5: "14:00:00", 6: "14:30:00",
-    7: "15:00:00", 8: "15:30:00", 9: "16:00:00", 10: "16:30:00",
-}
+def build_cam_slot_start(config: dict) -> dict[tuple[int, int], str]:
+    """config videos 섹션에서 (camera, slot) → start_time 룩업 테이블 생성."""
+    table: dict[tuple[int, int], str] = {}
+    for info in config.get("videos", {}).values():
+        key = (info["camera"], info["slot"])
+        if "start_time" in info:
+            table[key] = info["start_time"]
+    return table
 
 
 # ── 유틸 ──────────────────────────────────────────────────────────
 
-def frame_to_timestamp(frame_idx: int, fps: float, slot: int) -> str:
-    start = datetime.strptime(SLOT_START.get(slot, "00:00:00"), "%H:%M:%S")
+def frame_to_timestamp(frame_idx: int, fps: float, start_time: str) -> str:
+    start = datetime.strptime(start_time, "%H:%M:%S")
     ts = start + timedelta(seconds=frame_idx / fps)
     return ts.strftime("%H:%M:%S")
 
@@ -56,14 +91,16 @@ def pick_thumbnail(tdir: Path, crop_files: list) -> Path | None:
     return p if p.exists() else None
 
 
-def build_appearance(tdir: Path, meta: dict) -> dict:
+def build_appearance(tdir: Path, meta: dict,
+                     cam_slot_start: dict[tuple[int, int], str]) -> dict:
     fps = meta.get("src_fps", 24.0)
     slot = meta.get("time_slot", 0)
     cam = meta.get("camera_id", 0)
     crops = meta.get("crop_files", [])
     frames = meta.get("frame_indices", [])
-    start_t = frame_to_timestamp(frames[0], fps, slot) if frames else "??:??:??"
-    end_t   = frame_to_timestamp(frames[-1], fps, slot) if frames else "??:??:??"
+    origin = cam_slot_start.get((cam, slot), "00:00:00")
+    start_t = frame_to_timestamp(frames[0], fps, origin) if frames else "??:??:??"
+    end_t   = frame_to_timestamp(frames[-1], fps, origin) if frames else "??:??:??"
     return {
         "camera": cam,
         "slot": slot,
@@ -172,13 +209,15 @@ def extract_features(tracklets: list, extractor: OSNetExtractor) -> np.ndarray:
 # ── demo_data 저장 ────────────────────────────────────────────────
 
 def save_demo_data(tracklets: list, person_ids: list, feats: np.ndarray,
-                   out_dir: Path, tracklet_root: str):
+                   out_dir: Path, tracklet_root: str,
+                   cam_slot_start: dict[tuple[int, int], str] | None = None):
+    css = cam_slot_start or {}
     persons: dict[int, dict] = {}
     for t, pid, feat in zip(tracklets, person_ids, feats):
         if pid not in persons:
             persons[pid] = {"id": pid, "appearances": [],
                             "feat_sum": np.zeros(512), "feat_count": 0}
-        persons[pid]["appearances"].append(build_appearance(Path(t["tracklet_dir"]), t))
+        persons[pid]["appearances"].append(build_appearance(Path(t["tracklet_dir"]), t, css))
         persons[pid]["feat_sum"] += feat
         persons[pid]["feat_count"] += 1
 
@@ -248,12 +287,16 @@ def main():
     # 출력 폴더 초기화
     if out_dir.exists():
         ans = input(f"[WARN] '{out_dir}' 이미 존재합니다. 삭제하고 새로 생성할까요? [y/N] ").strip().lower()
-        if ans != "y":
-            print("취소")
-            sys.exit(0)
-        shutil.rmtree(out_dir)
-    out_dir.mkdir(parents=True)
-    (out_dir / "crops").mkdir()
+        if ans == "y":
+            shutil.rmtree(out_dir)
+            out_dir.mkdir(parents=True)
+            (out_dir / "crops").mkdir()
+        else:
+            print("[INFO] 기존 폴더를 그대로 사용합니다.")
+            (out_dir / "crops").mkdir(exist_ok=True)
+    else:
+        out_dir.mkdir(parents=True)
+        (out_dir / "crops").mkdir()
 
     # Re-ID 특징 추출기 로드
     extractor = OSNetExtractor(
@@ -322,7 +365,8 @@ def main():
 
     # demo_data 저장
     print("\n[STEP 4] demo_data 저장")
-    persons = save_demo_data(tracklets, person_ids, feats, out_dir, tracklet_root)
+    persons = save_demo_data(tracklets, person_ids, feats, out_dir, tracklet_root,
+                             cam_slot_start=build_cam_slot_start(config))
 
     # 임시 폴더 정리 (모드 2)
     if args.videos:
