@@ -83,7 +83,15 @@ class OSNetExtractor:
                     num_classes=1000,
                     pretrained=False
                 )
-            state = torch.load(wp, map_location="cpu")
+            try:
+                import numpy as np
+                torch.serialization.add_safe_globals([np._core.multiarray.scalar])
+            except Exception:
+                pass
+            try:
+                state = torch.load(wp, map_location="cpu", weights_only=True)
+            except Exception:
+                state = torch.load(wp, map_location="cpu", weights_only=False)
             # torchreid checkpoint 형식 대응 (state_dict 키 자동 감지)
             if "state_dict" in state:
                 state = state["state_dict"]
