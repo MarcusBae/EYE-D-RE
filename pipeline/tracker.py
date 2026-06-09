@@ -74,6 +74,7 @@ class PersonTracker:
         output_dir: str,
         frame_stride: int = 1,
         save_crops: bool = True,
+        progress_callback=None,
     ) -> Dict:
         """
         영상 1개에 대해 트래킹 → tracklet 단위 저장.
@@ -110,6 +111,7 @@ class PersonTracker:
         frame_idx = 0
         processed = 0
         pbar = tqdm(total=total_frames, desc=f"  track c{camera_id}_t{time_slot}", leave=False)
+        _cb_interval = max(1, total_frames // 200)
 
         while True:
             ret, frame = cap.read()
@@ -157,6 +159,10 @@ class PersonTracker:
                 processed += 1
             frame_idx += 1
             pbar.update(1)
+            if progress_callback and frame_idx % _cb_interval == 0:
+                progress_callback(frame_idx, total_frames)
+        if progress_callback:
+            progress_callback(total_frames, total_frames)
         pbar.close()
         cap.release()
 
