@@ -45,6 +45,8 @@ demo_app.py 가 읽는 data/demo_data/ 를 생성하는 전처리 스크립트.
   --videos   처리할 영상 파일 경로 목록 (모드 2)
   --threshold  HAC 병합 임계값 cosine distance (기본: config 값)
   --force    기존 demo_data 를 지우고 재생성
+
+──────────────────────────────────────────────────────────────
 """
 
 from __future__ import annotations
@@ -183,13 +185,54 @@ def run_quality_filter(tracklet_dir: Path, filtered_dir: Path, config: dict) -> 
     return filtered_dir
 
 
-def run_matching(tracklets: list, feats: np.ndarray, threshold: float) -> list:
+def run_matching(tracklets: list, feats: np.ndarray, threshold: float,
+                 debug: bool = False) -> list:
     """HAC 클러스터링으로 person_id 배정."""
     from scipy.cluster.hierarchy import fclusterdata
+    from scipy.spatial.distance import cdist
+
+    # [단계 1] 특징 벡터 L2 정규화 (L2 Normalization)
     norms = np.linalg.norm(feats, axis=1, keepdims=True)
     feats_norm = feats / np.maximum(norms, 1e-8)
+
+    if debug:
+        dist_mat = cdist(feats_norm, feats_norm, metric="cosine")
+        print(f"\n[DEBUG run_matching] 트랙렛 {len(tracklets)}개 / threshold={threshold}")
+        print(f"[DEBUG] 특징 벡터 norm 범위: min={norms.min():.4f}  max={norms.max():.4f}")
+        print("[DEBUG] pairwise cosine distance matrix:")
+        labels_w = max(len(Path(t['tracklet_dir']).name) for t in tracklets)
+        header = " " * (labels_w + 2) + "  ".join(
+            Path(t["tracklet_dir"]).name[-8:] for t in tracklets
+        )
+        print(header)
+        for i, t in enumerate(tracklets):
+            row = "  ".join(f"{dist_mat[i,j]:.3f}" for j in range(len(tracklets)))
+            print(f"  {Path(t['tracklet_dir']).name[-labels_w:]}  {row}")
+        print(f"[DEBUG] threshold={threshold} 기준으로 병합될 쌍 (dist < threshold):")
+        merged = [(i, j) for i in range(len(tracklets))
+                  for j in range(i+1, len(tracklets))
+                  if dist_mat[i, j] < threshold]
+        if merged:
+            for i, j in merged:
+                n_i = Path(tracklets[i]["tracklet_dir"]).name
+                n_j = Path(tracklets[j]["tracklet_dir"]).name
+                print(f"    {n_i} ↔ {n_j}  dist={dist_mat[i,j]:.4f}")
+        else:
+            print("    (없음 — 모든 트랙렛이 별도 클러스터)")
+
+    # [단계 2] 계층적 병합 군집화 (HAC Clustering) 수행
     labels = fclusterdata(feats_norm, t=threshold,
                           criterion="distance", metric="cosine", method="average")
+
+    if debug:
+        from collections import Counter
+        cluster_counts = Counter(int(l) for l in labels)
+        print(f"[DEBUG] 클러스터 결과: {len(cluster_counts)}개 클러스터")
+        for cid, cnt in sorted(cluster_counts.items()):
+            members = [Path(tracklets[i]["tracklet_dir"]).name
+                       for i, l in enumerate(labels) if int(l) == cid]
+            print(f"    cluster {cid}: {cnt}개 트랙렛 → {members}")
+
     return [int(l) for l in labels]
 
 
@@ -281,8 +324,10 @@ def main():
                         help="[모드 1] 사용할 슬롯 (예: c1_t4 c2_t4)")
     parser.add_argument("--frame-stride", type=int, default=6,
                         help="[모드 2] 트래킹 프레임 간격 (기본: 6)")
-    parser.add_argument("--threshold", type=float, default=0.30,
-                        help="매칭 임계값 — global_id 없을 때 사용 (기본: 0.30)")
+    parser.add_argument("--threshold", type=float, default=None,
+                        help="매칭 임계값 — 미지정 시 config.yaml reid.clustering.threshold 사용")
+    parser.add_argument("--debug", action="store_true",
+                        help="클러스터링 단계에서 pairwise 거리 행렬 출력")
     parser.add_argument("--out", default="data/demo_data")
     args = parser.parse_args()
 
@@ -290,6 +335,9 @@ def main():
         config = yaml.safe_load(f)
 
     reid_cfg   = config.get("reid", {})
+    if args.threshold is None:
+        args.threshold = float(reid_cfg.get("clustering", {}).get("threshold", 0.30))
+        print(f"[INFO] threshold = {args.threshold} (config.yaml 기준)")
     out_dir    = Path(args.out)
 
     # 출력 폴더 초기화
@@ -330,6 +378,11 @@ def main():
         tmp_track  = out_dir / "_tracklets"
         tmp_filter = out_dir / "_filtered"
 
+        for _d in (tmp_track, tmp_filter):
+            if _d.exists():
+                shutil.rmtree(_d)
+                print(f"[INFO] 기존 폴더 삭제: {_d}")
+
         print("\n[STEP 1] 트래킹")
         for vp in video_paths:
             cam, slot = get_video_cam_slot(vp, config)
@@ -369,17 +422,12 @@ def main():
         person_ids = [t["global_id"] for t in tracklets]
     else:
         print(f"[INFO] HAC 클러스터링 (threshold={args.threshold})")
-        person_ids = run_matching(tracklets, feats, args.threshold)
+        person_ids = run_matching(tracklets, feats, args.threshold, debug=args.debug)
 
     # demo_data 저장
     print("\n[STEP 4] demo_data 저장")
     persons = save_demo_data(tracklets, person_ids, feats, out_dir, tracklet_root,
                              cam_slot_start=build_cam_slot_start(config))
-
-    # 임시 폴더 정리 (모드 2)
-    if args.videos:
-        shutil.rmtree(out_dir / "_tracklets", ignore_errors=True)
-        shutil.rmtree(out_dir / "_filtered", ignore_errors=True)
 
     print()
     print("=" * 50)

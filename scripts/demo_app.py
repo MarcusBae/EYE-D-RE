@@ -808,8 +808,15 @@ elif _s == "pipeline":
     with pc1:
         c_stride = st.slider("프레임 스트라이드", 1, 12, 6,
                               help="N 프레임마다 1회 탐지. 클수록 빠르지만 정밀도 감소")
-        c_thresh = st.slider("HAC 클러스터링 임계값", 0.10, 0.50, 0.30, 0.05,
-                              help="낮을수록 보수적 (다른 사람으로 처리). 기본 0.30")
+        _thresh_default = 0.30
+        try:
+            import yaml as _yaml_thresh
+            _cfg_thresh = _yaml_thresh.safe_load(Path(config_path_sb).read_text(encoding="utf-8"))
+            _thresh_default = float(_cfg_thresh.get("reid", {}).get("clustering", {}).get("threshold", 0.30))
+        except Exception:
+            pass
+        c_thresh = st.slider("HAC 클러스터링 임계값", 0.10, 0.50, _thresh_default, 0.05,
+                              help="낮을수록 보수적 (다른 사람으로 처리). config.yaml reid.clustering.threshold")
     with pc2:
         c_append = st.checkbox(
             "기존 demo_data에 추가 (덮어쓰지 않음)", value=True,
@@ -1100,6 +1107,31 @@ elif _s == "pipeline":
             )
             st.balloons()
             load_manifest.clear()
+
+            # ── 신규 인물 썸네일 갤러리 ───────────────────────────
+            if _new_persons:
+                st.subheader(f"🖼️ 신규 생성 인물 썸네일 ({len(_new_persons)}명)")
+                _THUMB_COLS = 8
+                _tcols = st.columns(_THUMB_COLS)
+                for _ti, _tp in enumerate(_new_persons):
+                    with _tcols[_ti % _THUMB_COLS]:
+                        _timg = load_image(_tp.get("thumb"))
+                        if _timg:
+                            st.image(_timg, width=THUMB_W)
+                        else:
+                            st.markdown(
+                                "<div style='width:100px;height:120px;background:#1f2937;"
+                                "border:1px solid #374151;border-radius:4px;display:flex;"
+                                "align-items:center;justify-content:center;"
+                                "color:#6b7280;font-size:11px'>No img</div>",
+                                unsafe_allow_html=True,
+                            )
+                        _n_apps = len(_tp.get("appearances", []))
+                        _cams_t = sorted({a["camera"] for a in _tp.get("appearances", [])})
+                        st.caption(
+                            f"**#{_tp['id']:04d}**  "
+                            f"{_n_apps}구간 · CAM {','.join(str(c) for c in _cams_t)}"
+                        )
 
         except RuntimeError:
             pass  # already shown st.error above

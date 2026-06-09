@@ -86,8 +86,8 @@ reid:
   model_name: "osnet_ain_x1_0" # OSNet 백본 모델 크기 (osnet_x1_0, osnet_ain_x1_0 등)
   pretrained: true
   # Re-ID pretrained 가중치 파일 경로 (null이면 ImageNet pretrained 사용)
-  # weights_path: null # ImageNet
-  weights_path: "/home/torious/projects/tmp/EYE-D-RE/models/osnet_ain_x1_0_market1501.pth"  # Market-1501 pretrained. ImageNet: null
+  weights_path: null  # ImageNet (market1501.pth는 torchreid 버전 불일치로 사용 불가)
+  # weights_path: "models/osnet_ain_x1_0_market1501.pth"  # 구버전 torchreid 체크포인트 — 키 불일치
   device: "auto" # auto | cuda | cpu
   batch_size: 64
   # HAC(Hierarchical Agglomerative Clustering) 하이퍼파라미터

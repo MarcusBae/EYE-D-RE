@@ -66,23 +66,7 @@ class OSNetExtractor:
             if not wp.exists():
                 raise FileNotFoundError(f"가중치 파일을 찾을 수 없습니다: {wp.resolve()}")
             print(f"[INFO] 로컬 가중치 로딩: {wp.name}")
-            # 아키텍처 로드: torch.hub 실패 시 torchreid로 fallback
-            model = None
-            try:
-                model = torch.hub.load(
-                    "KaiyangZhou/deep-person-reid",
-                    model_name,
-                    pretrained=False
-                )
-            except Exception as e:
-                print(f"[WARN] torch.hub 아키텍처 로드 실패, torchreid로 전환: {e}")
-            if model is None:
-                import torchreid
-                model = torchreid.models.build_model(
-                    name=model_name,
-                    num_classes=1000,
-                    pretrained=False
-                )
+            import torchreid
             try:
                 import numpy as np
                 torch.serialization.add_safe_globals([np._core.multiarray.scalar])
@@ -99,15 +83,28 @@ class OSNetExtractor:
                 state = state["model"]
             # module. 프리픽스 제거 (DataParallel 저장 체크포인트 대응)
             state = {k[7:] if k.startswith("module.") else k: v for k, v in state.items()}
-            # shape mismatch(classifier 클래스 수 등) 키 제외 후 로드
+            # 체크포인트에서 num_classes 자동 감지 (classifier.weight 또는 fc.weight)
+            num_classes = 1000
+            for key in ("classifier.weight", "fc.weight"):
+                if key in state:
+                    num_classes = state[key].shape[0]
+                    break
+            print(f"[INFO] 체크포인트 num_classes={num_classes} 감지")
+            model = torchreid.models.build_model(
+                name=model_name,
+                num_classes=num_classes,
+                pretrained=False,
+            )
+            # 모델에 없는 키(InstanceNorm running stats 등) 사전 제거 후 로드
             model_state = model.state_dict()
-            compatible = {k: v for k, v in state.items()
-                          if k in model_state and v.shape == model_state[k].shape}
-            model_state.update(compatible)
-            model.load_state_dict(model_state)
-            skipped = len(state) - len(compatible)
+            filtered = {k: v for k, v in state.items() if k in model_state}
+            missing = model.load_state_dict(filtered, strict=False)
+            n_missing  = len(missing.missing_keys)
+            n_unexpected = len(missing.unexpected_keys)
+            if n_missing > 0:
+                print(f"[WARN] missing 키 샘플 (처음 5개): {missing.missing_keys[:5]}")
             print(f"[INFO] Re-ID pretrained 가중치 로드 완료: {wp.name} "
-                  f"({len(compatible)}/{len(state)} 레이어, {skipped}개 shape 불일치 제외)")
+                  f"(missing={n_missing}, unexpected={n_unexpected})")
             return model
 
         # 2순위: torch.hub 로딩 (ImageNet pretrained)
