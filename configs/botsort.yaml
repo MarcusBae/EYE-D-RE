@@ -5,11 +5,12 @@
 tracker_type: botsort
 
 # --- Detection association ---
-track_high_thresh: 0.6    # 1차 association high-confidence 임계값
+track_high_thresh: 0.5    # 1차 association high-confidence 임계값 (0.6→0.5: 더 많은 탐지 활용)
 track_low_thresh: 0.1     # 2차 association low-confidence 임계값
-new_track_thresh: 0.7     # 신규 track 생성 임계값 (높을수록 보수적)
-track_buffer: 60          # 소실 후 track 보존 프레임 수 (bytetrack 30 → 60으로 증가)
-match_thresh: 0.8         # IoU 기반 1차 매칭 임계값
+new_track_thresh: 0.6     # 신규 track 생성 임계값 (0.7→0.6: 재등장 인물 기존 track 복구 유리)
+track_buffer: 30          # 소실 후 track 보존 업데이트 틱 수
+                          # stride=1 기준 30틱=1초, stride=6 기준 30틱=180프레임=6초
+match_thresh: 0.7         # IoU 기반 1차 매칭 임계값 (0.8→0.7: 빠른 이동에 유연하게 대응)
 fuse_score: True
 
 # --- 카메라 모션 보상 ---
@@ -19,4 +20,4 @@ gmc_method: sparseOptFlow  # 고정 CCTV는 none도 가능, 카메라 흔들림 
 with_reid: True            # Re-ID 외형 특징 활성화 (겹침 상황 ID switch 방지)
 model: auto                # Re-ID 모델 (auto = YOLO 백본 특징 재사용, 별도 모델 불필요)
 proximity_thresh: 0.5      # Re-ID 적용 전 IoU 근접도 필터
-appearance_thresh: 0.25    # cosine distance 상한 (낮을수록 엄격)
+appearance_thresh: 0.4     # cosine distance 상한 (0.25→0.4: 조명·각도 변화에 더 유연하게 매칭)
