@@ -806,8 +806,8 @@ elif _s == "pipeline":
     st.subheader("② 파라미터")
     pc1, pc2 = st.columns(2)
     with pc1:
-        c_stride = st.slider("프레임 스트라이드", 1, 12, 6,
-                              help="N 프레임마다 1회 탐지. 클수록 빠르지만 정밀도 감소")
+        c_stride = st.slider("프레임 스트라이드", 1, 12, 2,
+                              help="N 프레임마다 1회 탐지. ID switch 줄이려면 1~2 권장, 속도 우선이면 6")
         _thresh_default = 0.30
         try:
             import yaml as _yaml_thresh

@@ -393,6 +393,19 @@ def main():
             if slot_dir.is_dir():
                 run_quality_filter(slot_dir, tmp_filter / slot_dir.name, config)
 
+        print("\n[STEP 2-b] 혼합 트랙렛 분리 (tracklet splitter)")
+        from pipeline.tracklet_splitter import split_all as _split_all
+        _split_cfg = config.get("reid", {}).get("clustering", {})
+        _split_thresh = float(_split_cfg.get("split_threshold",
+                              _split_cfg.get("threshold", 0.30)))
+        _split_stats = _split_all(
+            tmp_filter, extractor,
+            split_threshold=_split_thresh,
+            min_crops_per_part=3,
+        )
+        print(f"  [splitter] 전체 {_split_stats['total']}개 중 "
+              f"{_split_stats['split']}개 분리, {_split_stats['skipped']}개 유지")
+
         tracklet_root = str(tmp_filter)
 
     else:
