@@ -18,7 +18,6 @@ import cv2
 import numpy as np
 from tqdm import tqdm
 
-from .tracklet_io import list_tracklets
 
 
 # -------------------------------------------------------------
@@ -105,6 +104,7 @@ class TrackletQualityFilter:
         output_dir: str,
         copy_crops: bool = True,
         verbose: bool = True,
+        sample_failures: int = 0,
     ) -> Dict:
         """
         tracklet_dir 아래 모든 tracklet에 필터 적용 → output_dir로 복사.
@@ -117,9 +117,25 @@ class TrackletQualityFilter:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        all_tracks = list_tracklets(str(tracklet_dir))
+        # tracklet_dir 바로 아래 track_* 서브디렉토리를 직접 스캔
+        all_tracks = []
+        for _td in sorted(tracklet_dir.glob("track_*")):
+            if not _td.is_dir():
+                continue
+            _mp = _td / "metadata.json"
+            if not _mp.exists():
+                continue
+            try:
+                import json as _json
+                with open(_mp, encoding="utf-8") as _f:
+                    _meta = _json.load(_f)
+                _meta["tracklet_dir"] = str(_td)
+                all_tracks.append(_meta)
+            except Exception as _e:
+                print(f"[WARN] {_mp} 로드 실패: {_e}")
         passed_meta = []
         failed_reasons: Dict[str, int] = {}
+        failed_samples: List[Dict] = []
 
         for meta in tqdm(all_tracks, desc="quality filter", disable=not verbose):
             passed, reasons = self.evaluate(meta)
@@ -131,6 +147,12 @@ class TrackletQualityFilter:
                 for r in reasons:
                     key = r.split("(")[0]
                     failed_reasons[key] = failed_reasons.get(key, 0) + 1
+                if sample_failures > 0 and len(failed_samples) < sample_failures:
+                    failed_samples.append({
+                        "track_id": meta.get("track_id"),
+                        "tracklet_dir": meta.get("tracklet_dir"),
+                        "reasons": reasons,
+                    })
 
         stats = {
             "total": len(all_tracks),
@@ -138,6 +160,7 @@ class TrackletQualityFilter:
             "failed": len(all_tracks) - len(passed_meta),
             "pass_rate": (len(passed_meta) / len(all_tracks)) if all_tracks else 0.0,
             "failure_reasons": dict(sorted(failed_reasons.items(), key=lambda x: -x[1])),
+            "failed_samples": failed_samples,
             "filter_params": {
                 "min_length": self.min_length,
                 "min_avg_conf": self.min_avg_conf,
@@ -161,10 +184,9 @@ class TrackletQualityFilter:
     # -----------------------------------------------------
     @staticmethod
     def _copy_tracklet(meta: Dict, output_dir: Path) -> None:
-        """통과한 tracklet을 그대로 output_dir에 복사."""
+        """통과한 tracklet을 output_dir/track_xxxx/ 로 복사."""
         src = Path(meta["tracklet_dir"])
-        rel = src.relative_to(src.parent.parent) # c{cam}_t{slot}/track_xxxx
-        dst = output_dir / rel
+        dst = output_dir / src.name  # track_xxxx 만 붙임
         dst.mkdir(parents=True, exist_ok=True)
         for item in src.iterdir():
             shutil.copy2(item, dst / item.name)

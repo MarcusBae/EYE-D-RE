@@ -11,12 +11,16 @@ EYE-D 데모 Streamlit 앱.
 from __future__ import annotations
 
 import json
+import shutil
 import sys
+import tempfile
+import traceback
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import math
 
+import cv2
 import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
@@ -411,46 +415,127 @@ with st.sidebar:
     st.caption("Multi-Camera Person Re-Identification")
     st.divider()
     data_dir = st.text_input("Demo 데이터 경로", value="data/demo_data")
+    config_path_sb = st.text_input("Config 경로", value="configs/config.yaml")
     st.divider()
     scenario = st.radio(
         "시나리오 선택",
-        ["A — 동선 분석", "B — 관심 인물 탐색"],
+        ["A — 동선 데이터 분석", "B — 동선 확인", "C — 관심 인물 탐색"],
         index=0,
     )
 
 # ── 데이터 로드 ───────────────────────────────────────────────────
+# 사용자 레이블(A/B/C) → 내부 코드(pipeline/movement/person) 매핑
+# A=동선 데이터 분석(파이프라인), B=동선 확인, C=관심 인물 탐색
+_s = {"A": "pipeline", "B": "movement", "C": "person"}.get(scenario[0], "pipeline")
+
 manifest = load_manifest(data_dir)
 
-if not manifest:
-    st.warning(f"**{data_dir}/manifest.json** 을 찾을 수 없습니다.")
-    st.code("python scripts/demo_preprocess.py --config configs/config.yaml")
-    st.stop()
+if _s != "pipeline":
+    if not manifest:
+        st.warning(f"**{data_dir}/manifest.json** 을 찾을 수 없습니다.")
+        st.code("python scripts/demo_preprocess.py --config configs/config.yaml")
+        st.stop()
 
-persons = manifest.get("persons", [])
-if not persons:
-    st.error("등록된 인물이 없습니다.")
-    st.stop()
+    persons = manifest.get("persons", [])
+    if not persons:
+        st.error("등록된 인물이 없습니다.")
+        st.stop()
+else:
+    persons = manifest.get("persons", []) if manifest else []
 
-# ── 시나리오 A: 동선 분석 ─────────────────────────────────────────
-if scenario.startswith("A"):
-    st.header("📊 시나리오 A — 동선 분석")
-    st.caption("녹화 영상에 등장한 모든 인물의 카메라별 이동 경로를 자동으로 정리합니다.")
+# ── 시나리오 B: 동선 확인 ─────────────────────────────────────────
+if _s == "movement":
+    st.header("📊 시나리오 B — 동선 확인")
+    st.caption("썸네일을 클릭해 인물을 선택하면 해당 인물의 카메라별 이동 경로를 확인합니다.")
     st.divider()
 
-    # 카메라 목록 수집
-    all_cams = sorted({
-        app["camera"]
-        for p in persons
-        for app in p["appearances"]
-    })
-    cam_labels = {c: f"CAM {c}" for c in all_cams}
+    # ① 인물 갤러리 ───────────────────────────────────────────────
+    st.subheader("① 인물 선택")
 
-    # 요약 지표
-    multi_cam = [p for p in persons if len({a["camera"] for a in p["appearances"]}) > 1]
-    col1, col2, col3 = st.columns(3)
-    col1.metric("총 등장 인물", len(persons))
-    col2.metric("다중 카메라 등장", len(multi_cam))
-    col3.metric("카메라 수", len(all_cams))
+    if "b_selected_pids" not in st.session_state:
+        st.session_state["b_selected_pids"] = set()
+    _b_sel: set = st.session_state["b_selected_pids"]
+
+    _ba, _bb, _bc = st.columns([1, 1, 6])
+    with _ba:
+        if st.button("전체 선택", use_container_width=True):
+            st.session_state["b_selected_pids"] = {p["id"] for p in persons}
+            st.rerun()
+    with _bb:
+        if st.button("전체 해제", use_container_width=True, disabled=not _b_sel):
+            st.session_state["b_selected_pids"] = set()
+            st.rerun()
+
+    _n_cols_b = 8
+    _cols_b = st.columns(_n_cols_b)
+    for _bi, _bp in enumerate(persons):
+        _bpid = _bp["id"]
+        _bsel = _bpid in _b_sel
+        with _cols_b[_bi % _n_cols_b]:
+            _bimg = load_image(_bp.get("thumb"))
+            if _bimg:
+                st.image(_bimg, width=THUMB_W)
+            if st.button(
+                f"#{_bpid:04d}",
+                key=f"b_btn_{_bpid}",
+                type="primary" if _bsel else "secondary",
+                use_container_width=True,
+            ):
+                if _bsel:
+                    st.session_state["b_selected_pids"].discard(_bpid)
+                else:
+                    st.session_state["b_selected_pids"].add(_bpid)
+                st.rerun()
+            if _bsel:
+                if st.button("🗑", key=f"b_del_{_bpid}", use_container_width=True,
+                             help="이 인물을 데이터에서 삭제"):
+                    st.session_state["b_del_confirm"] = _bpid
+                    st.rerun()
+
+    # 삭제 확인 대화 ─────────────────────────────────────────────
+    if "b_del_confirm" in st.session_state:
+        _dpid = st.session_state["b_del_confirm"]
+        st.warning(
+            f"⚠️ **Person #{_dpid:04d}** 를 삭제하시겠습니까?  "
+            f"manifest에서 제거되고 crops 폴더도 삭제됩니다."
+        )
+        _dc1, _dc2, _ = st.columns([1, 1, 6])
+        with _dc1:
+            if st.button("삭제 확인", type="primary", use_container_width=True):
+                _manifest_path = Path(data_dir) / "manifest.json"
+                _mdata = json.loads(_manifest_path.read_text(encoding="utf-8"))
+                _mdata["persons"] = [p for p in _mdata["persons"] if p["id"] != _dpid]
+                _mdata["num_persons"] = len(_mdata["persons"])
+                _manifest_path.write_text(
+                    json.dumps(_mdata, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                _crops_del = Path(data_dir) / "crops" / f"{_dpid:04d}"
+                if _crops_del.exists():
+                    shutil.rmtree(str(_crops_del))
+                st.session_state["b_selected_pids"].discard(_dpid)
+                del st.session_state["b_del_confirm"]
+                load_manifest.clear()
+                st.rerun()
+        with _dc2:
+            if st.button("취소", use_container_width=True):
+                del st.session_state["b_del_confirm"]
+                st.rerun()
+
+    st.divider()
+
+    # ② 동선 보기 ─────────────────────────────────────────────────
+    if not _b_sel:
+        st.info("위에서 인물 썸네일을 클릭해 선택하면 동선이 표시됩니다.")
+        st.stop()
+
+    _sel_persons = [p for p in persons if p["id"] in _b_sel]
+    _all_cams_b  = sorted({app["camera"] for p in persons for app in p["appearances"]})
+    _multi_cam_b = [p for p in _sel_persons if len({a["camera"] for a in p["appearances"]}) > 1]
+
+    _bc1, _bc2, _bc3 = st.columns(3)
+    _bc1.metric("선택 인물", len(_sel_persons))
+    _bc2.metric("다중 카메라 등장", len(_multi_cam_b))
+    _bc3.metric("전체 카메라 수", len(_all_cams_b))
     st.divider()
 
     view_mode = st.radio(
@@ -462,41 +547,9 @@ if scenario.startswith("A"):
 
     if view_mode == "🗺️ 그래프 보기":
         st.subheader("카메라 이동 흐름")
-
-        # 인물 하이라이트 선택
-        sorted_persons = sorted(
-            persons,
-            key=lambda p: (-(len({a["camera"] for a in p["appearances"]}) > 1), p["id"]),
-        )
-        options: dict[str, int | None] = {"— 전체 보기 —": None}
-        for p in sorted_persons:
-            apps = sorted(p["appearances"], key=lambda a: a["start_time"])
-            seq = [a["camera"] for a in apps]
-            deduped: list = [seq[0]]
-            for c in seq[1:]:
-                if c != deduped[-1]:
-                    deduped.append(c)
-            icon = "🔴" if len(set(seq)) > 1 else "⚪"
-            label = f"{icon} Person #{p['id']:04d}  ( {' → '.join(f'CAM {c}' for c in deduped)} )"
-            options[label] = p["id"]
-
-        sel_label = st.selectbox("인물 동선 하이라이트", list(options.keys()), index=0)
-        highlight_pid = options[sel_label]
-
-        if highlight_pid is not None:
-            hp = next(p for p in persons if p["id"] == highlight_pid)
-            apps = sorted(hp["appearances"], key=lambda a: a["start_time"])
-            path_str = " → ".join(
-                f"CAM {a['camera']} ({a['start_time']})" for a in apps
-            )
-            st.info(f"**Person #{highlight_pid:04d}** 이동 경로: {path_str}")
-
-        st.caption(
-            "노드 = 카메라 · 화살표 = 이동 방향 · 화살표 위 숫자 = 이동 인원 수"
-            + ("  |  🟠 = 선택 인물 동선" if highlight_pid is not None else "")
-        )
+        st.caption("노드 = 카메라 · 화살표 = 이동 방향 · 숫자 = 선택 인물 이동 수")
         st.plotly_chart(
-            render_camera_graph(persons, all_cams, highlight_pid=highlight_pid),
+            render_camera_graph(_sel_persons, _all_cams_b),
             use_container_width=True,
         )
         st.divider()
@@ -504,15 +557,15 @@ if scenario.startswith("A"):
     elif view_mode == "▶ 애니메이션":
         st.subheader("카메라 인원 흐름 애니메이션")
         st.caption(
-            "노드 크기·색 = 해당 시각 인원 수 (클수록 많음) · "
+            "노드 크기·색 = 해당 시각 인원 수 · "
             "주황 엣지 = 이동 발생 구간 (±2분 윈도우) · "
             "회색 화살표 = 이동 방향"
         )
-        st.plotly_chart(render_animated_flow(persons, all_cams), use_container_width=True)
+        st.plotly_chart(render_animated_flow(_sel_persons, _all_cams_b), use_container_width=True)
         st.divider()
 
-    # 인물별 동선 카드
-    for person in persons:
+    # 선택 인물별 동선 카드
+    for person in _sel_persons:
         pid = person["id"]
         apps = person["appearances"]
         cams_seen = sorted({a["camera"] for a in apps})
@@ -560,9 +613,9 @@ if scenario.startswith("A"):
                     )
                     st.success(f"Cross-camera 이동 경로: {path_str}")
 
-# ── 시나리오 B: 관심 인물 탐색 ───────────────────────────────────
-else:
-    st.header("🔍 시나리오 B — 관심 인물 탐색")
+# ── 시나리오 C: 관심 인물 탐색 ───────────────────────────────────
+elif _s == "person":
+    st.header("🔍 시나리오 C — 관심 인물 탐색")
     st.caption("특정 인물을 선택하면 전체 영상에서 해당 인물이 등장한 구간을 찾아드립니다.")
     st.divider()
 
@@ -664,6 +717,398 @@ else:
                 with rc3:
                     st.markdown(f"**카메라**: CAM {r['camera']}")
                     st.markdown(f"**등장**: {r['start_time']} ~ {r['end_time']}")
+
+# ── 시나리오 A: 동선 데이터 분석 ─────────────────────────────────
+elif _s == "pipeline":
+    st.header("⚙️ 시나리오 A — 동선 데이터 분석")
+    st.caption(
+        "영상 파일에서 추적 → 품질 필터 → Re-ID 특징 추출 → HAC 클러스터링을 실행해 "
+        "demo_data에 인물 정보를 추가합니다."
+    )
+    st.divider()
+
+    VIDEO_EXTS_C = {".mp4", ".avi", ".mov", ".mkv"}
+    ROOT_C = Path(__file__).resolve().parent.parent
+
+    def _open_file_dialog_c() -> list[str]:
+        import tkinter as tk
+        from tkinter import filedialog
+        root = tk.Tk()
+        root.withdraw()
+        root.wm_attributes("-topmost", 1)
+        files = filedialog.askopenfilenames(
+            title="영상 파일 선택",
+            filetypes=[("영상 파일", "*.mp4 *.avi *.mov *.mkv"), ("모든 파일", "*.*")],
+        )
+        root.destroy()
+        return list(files)
+
+    def _open_folder_dialog_c() -> list[str]:
+        import tkinter as tk
+        from tkinter import filedialog
+        root = tk.Tk()
+        root.withdraw()
+        root.wm_attributes("-topmost", 1)
+        folder = filedialog.askdirectory(title="영상 폴더 선택")
+        root.destroy()
+        if not folder:
+            return []
+        p = Path(folder)
+        found: list[str] = []
+        for ext in VIDEO_EXTS_C:
+            found.extend(str(f) for f in sorted(p.glob(f"*{ext}")))
+        return found
+
+    # ① 영상 파일 선택 ──────────────────────────────────────────────
+    st.subheader("① 영상 파일 선택")
+
+    fb_col, fd_col, clr_col = st.columns([2, 2, 1])
+    with fb_col:
+        if st.button("📁 파일 선택...", use_container_width=True,
+                     help="개별 영상 파일을 선택합니다 (다중 선택 가능)"):
+            picked = _open_file_dialog_c()
+            if picked:
+                prev = st.session_state.get("c_selected_files", [])
+                st.session_state["c_selected_files"] = list(dict.fromkeys(prev + picked))
+                st.rerun()
+    with fd_col:
+        if st.button("📂 폴더 선택...", use_container_width=True,
+                     help="폴더를 선택하면 하위 영상 파일을 모두 추가합니다"):
+            picked = _open_folder_dialog_c()
+            if picked:
+                prev = st.session_state.get("c_selected_files", [])
+                st.session_state["c_selected_files"] = list(dict.fromkeys(prev + picked))
+                st.rerun()
+            elif picked == []:
+                st.warning("선택한 폴더에 영상 파일이 없습니다.")
+    with clr_col:
+        if st.button("🗑 전체 지우기", use_container_width=True,
+                     disabled=not st.session_state.get("c_selected_files")):
+            st.session_state["c_selected_files"] = []
+            st.rerun()
+
+    selected_c: list[str] = st.session_state.get("c_selected_files", [])
+
+    if selected_c:
+        with st.container(border=True):
+            for _fi, _fp in enumerate(selected_c):
+                _rc1, _rc2 = st.columns([8, 1])
+                with _rc1:
+                    st.caption(f"**{Path(_fp).name}**  `{_fp}`")
+                with _rc2:
+                    if st.button("✕", key=f"c_rm_{_fi}"):
+                        st.session_state["c_selected_files"].pop(_fi)
+                        st.rerun()
+    else:
+        st.caption("📁 파일 선택 또는 📂 폴더 선택 버튼으로 영상을 추가하세요.")
+
+    # ② 파라미터 ────────────────────────────────────────────────────
+    st.subheader("② 파라미터")
+    pc1, pc2 = st.columns(2)
+    with pc1:
+        c_stride = st.slider("프레임 스트라이드", 1, 12, 6,
+                              help="N 프레임마다 1회 탐지. 클수록 빠르지만 정밀도 감소")
+        c_thresh = st.slider("HAC 클러스터링 임계값", 0.10, 0.50, 0.30, 0.05,
+                              help="낮을수록 보수적 (다른 사람으로 처리). 기본 0.30")
+    with pc2:
+        c_append = st.checkbox(
+            "기존 demo_data에 추가 (덮어쓰지 않음)", value=True,
+            help="체크 시 기존 인물 데이터를 보존하고 새 인물을 추가합니다."
+        )
+
+    with st.expander("🔧 품질 필터 파라미터 조정", expanded=False):
+        st.caption("트랙렛이 0개 통과될 때는 아래 값을 낮추거나 0으로 설정하세요.")
+        qf_c1, qf_c2, qf_c3 = st.columns(3)
+        with qf_c1:
+            qf_min_length = st.slider("최소 트랙 길이 (프레임)", 0, 30, 6,
+                                      help="이 프레임 수 미만 트랙렛 제거")
+            qf_min_conf   = st.slider("최소 평균 신뢰도", 0.0, 1.0, 0.7, 0.05,
+                                      help="평균 탐지 신뢰도가 이 값 미만이면 제거")
+        with qf_c2:
+            qf_min_h    = st.slider("최소 bbox 높이 (px)", 0, 256, 64)
+            qf_min_w    = st.slider("최소 bbox 너비 (px)", 0, 128, 32)
+        with qf_c3:
+            qf_max_ratio = st.slider("최대 종횡비 (H/W)", 1.0, 12.0, 4.0, 0.5,
+                                     help="이 값 초과 트랙렛 제거 (너무 좁은 bbox)")
+            qf_min_area  = st.slider("최소 bbox 면적 (px²)", 0, 8192, 2048, 128)
+
+    # ③ 실행 버튼 ───────────────────────────────────────────────────
+    if selected_c:
+        st.info(
+            f"선택된 영상 **{len(selected_c)}개**: "
+            + ", ".join(Path(v).name for v in selected_c[:5])
+            + (f" 외 {len(selected_c)-5}개" if len(selected_c) > 5 else "")
+        )
+    run_c = st.button("▶ 파이프라인 실행", type="primary", disabled=not selected_c)
+
+    # ④ 파이프라인 실행 ─────────────────────────────────────────────
+    if run_c and selected_c:
+        # sys.path 준비
+        if str(ROOT_C) not in sys.path:
+            sys.path.insert(0, str(ROOT_C))
+        scripts_dir_c = ROOT_C / "scripts"
+        if str(scripts_dir_c) not in sys.path:
+            sys.path.insert(0, str(scripts_dir_c))
+
+        import yaml as _yaml
+
+        cfg_path_c = Path(config_path_sb)
+        if not cfg_path_c.exists():
+            st.error(f"Config 파일을 찾을 수 없습니다: {cfg_path_c}")
+            st.stop()
+
+        with open(cfg_path_c, encoding="utf-8") as _f:
+            cfg_c = _yaml.safe_load(_f)
+
+        try:
+            from pipeline.tracker import PersonTracker as _PersonTracker
+            from pipeline.reid_merger import OSNetExtractor as _OSNetExtractor
+            from pipeline.tracklet_io import list_tracklets as _list_tracklets
+            from pipeline.quality_filter import TrackletQualityFilter as _TQF
+            from demo_preprocess import (
+                get_video_cam_slot as _get_cam_slot,
+                build_cam_slot_start as _build_css,
+                run_matching as _run_matching,
+                save_demo_data as _save_demo_data,
+            )
+        except ImportError as _ie:
+            st.error(f"모듈 임포트 실패: {_ie}")
+            st.stop()
+
+        out_dir_c = Path(data_dir)
+        out_dir_c.mkdir(parents=True, exist_ok=True)
+
+        # 영상 유효성 검사
+        invalid_c = [v for v in selected_c if _get_cam_slot(Path(v), cfg_c) is None]
+        for _v in invalid_c:
+            st.warning(f"⚠️ {Path(_v).name} — config.yaml videos 섹션에 없어 건너뜁니다.")
+        valid_c = [v for v in selected_c if v not in invalid_c]
+        if not valid_c:
+            st.error("처리할 영상이 없습니다. config.yaml의 videos 섹션을 확인하세요.")
+            st.stop()
+
+        cam_slot_start_c = _build_css(cfg_c)
+        reid_cfg_c = cfg_c.get("reid", {})
+        det_cfg_c  = cfg_c.get("detection", {})
+        trk_cfg_c  = cfg_c.get("tracking", {})
+        qf_cfg_c   = cfg_c.get("quality_filter", {})
+        n_vids = len(valid_c)
+
+        overall_bar = st.progress(0.0, text="준비 중...")
+
+        try:
+            # 기존 manifest 백업 (복구 안전망)
+            _manifest_src = out_dir_c / "manifest.json"
+            _manifest_bak = out_dir_c / "manifest.json.bak"
+            if _manifest_src.exists():
+                shutil.copy2(_manifest_src, _manifest_bak)
+
+            tmp_dir_c = Path(tempfile.mkdtemp())
+            tmp_track_c  = tmp_dir_c / "tracklets"
+            tmp_filter_c = tmp_dir_c / "filtered"
+            tmp_track_c.mkdir(); tmp_filter_c.mkdir()
+
+            # ── Step 1: 모델 로드 ─────────────────────────────────
+            with st.status("⚙️ Step 1: 모델 로드 중...", expanded=False) as _s1:
+                _extractor_c = _OSNetExtractor(
+                    model_name=reid_cfg_c.get("model_name", "osnet_ain_x1_0"),
+                    pretrained=reid_cfg_c.get("pretrained", True),
+                    weights_path=reid_cfg_c.get("weights_path"),
+                    device=reid_cfg_c.get("device", "auto"),
+                )
+                _tracker_c = _PersonTracker(
+                    model_path=det_cfg_c.get("model", "yolov8n.pt"),
+                    tracker_yaml=trk_cfg_c.get("tracker_yaml", "configs/botsort.yaml"),
+                    conf=det_cfg_c.get("conf_threshold", 0.5),
+                    iou=det_cfg_c.get("iou_threshold", 0.45),
+                    imgsz=det_cfg_c.get("imgsz", 640),
+                    classes=det_cfg_c.get("classes", [0]),
+                    device=det_cfg_c.get("device", "auto"),
+                )
+                _s1.update(label="✅ Step 1: 모델 로드 완료", state="complete")
+            overall_bar.progress(0.08, text="Step 1 완료: 모델 로드")
+
+            # ── Step 2: 트래킹 ────────────────────────────────────
+            # 전체 프레임 수 사전 집계 (progress % 계산용)
+            _frames_per_vid: list[int] = []
+            for _vp_str in valid_c:
+                _cap_tmp = cv2.VideoCapture(_vp_str)
+                _frames_per_vid.append(int(_cap_tmp.get(cv2.CAP_PROP_FRAME_COUNT)))
+                _cap_tmp.release()
+            _total_all_frames = max(sum(_frames_per_vid), 1)
+
+            with st.status(f"🎬 Step 2: 트래킹 (0/{n_vids})", expanded=True) as _s2:
+                _track_bar = st.progress(0.0, text="0.0%  (0 / 0 프레임)")
+                _frames_done_before = 0
+
+                for _i, _vp_str in enumerate(valid_c):
+                    _vp = Path(_vp_str)
+                    _vid_frames = _frames_per_vid[_i]
+                    st.write(f"처리 중: **{_vp.name}** ({_vid_frames:,} 프레임)")
+                    _cam_c, _slot_c = _get_cam_slot(_vp, cfg_c)
+
+                    _done_snap = _frames_done_before  # capture for closure
+
+                    def _make_cb(_done_before, _total_all, _bar):
+                        def _cb(_cur, _tot):
+                            _done = _done_before + _cur
+                            _pct = _done / _total_all
+                            _bar.progress(
+                                min(_pct, 1.0),
+                                text=f"{_pct*100:.1f}%  ({_done:,} / {_total_all:,} 프레임)",
+                            )
+                        return _cb
+
+                    _tracker_c.track_video(
+                        video_path=str(_vp),
+                        camera_id=_cam_c,
+                        time_slot=_slot_c,
+                        output_dir=str(tmp_track_c),
+                        frame_stride=c_stride,
+                        save_crops=True,
+                        progress_callback=_make_cb(_done_snap, _total_all_frames, _track_bar),
+                    )
+                    _frames_done_before += _vid_frames
+                    _s2.update(label=f"🎬 Step 2: 트래킹 ({_i+1}/{n_vids})")
+
+                _track_bar.progress(1.0, text=f"100.0%  ({_total_all_frames:,} / {_total_all_frames:,} 프레임)")
+                _s2.update(label=f"✅ Step 2: 트래킹 완료 ({n_vids}개)", state="complete")
+            overall_bar.progress(0.40, text="Step 2 완료: 트래킹")
+
+            # ── Step 3: 품질 필터 ─────────────────────────────────
+            _filt_c = _TQF(
+                min_length=qf_min_length,
+                min_avg_conf=qf_min_conf,
+                min_bbox_h=qf_min_h,
+                min_bbox_w=qf_min_w,
+                max_aspect_ratio=qf_max_ratio,
+                min_area=qf_min_area,
+            )
+            with st.status("🔍 Step 3: 품질 필터링...", expanded=True) as _s3:
+                _passed_total = 0
+                _slot_dirs = sorted(d for d in tmp_track_c.iterdir() if d.is_dir())
+                for _sd in _slot_dirs:
+                    _fout = tmp_filter_c / _sd.name
+                    _fout.mkdir(parents=True, exist_ok=True)
+                    _stats = _filt_c.filter_all(
+                        tracklet_dir=str(_sd),
+                        output_dir=str(_fout),
+                        copy_crops=True,
+                        verbose=False,
+                    )
+                    _p = _stats.get("passed", 0) if isinstance(_stats, dict) else 0
+                    _t = _stats.get("total",  0) if isinstance(_stats, dict) else 0
+                    _passed_total += _p
+                    st.write(f"  {_sd.name}: {_p}/{_t}개 통과")
+                _s3.update(
+                    label=f"✅ Step 3: 품질 필터 완료 — {_passed_total}개 통과",
+                    state="complete",
+                )
+            overall_bar.progress(0.55, text="Step 3 완료: 품질 필터")
+
+            # ── Step 4: 특징 추출 ─────────────────────────────────
+            _tracklets_c = _list_tracklets(str(tmp_filter_c))
+            if not _tracklets_c:
+                st.error(
+                    "품질 필터를 통과한 트랙렛이 없습니다. "
+                    "아래 '🔧 품질 필터 파라미터 조정'에서 값을 낮추고 다시 실행하세요."
+                )
+                raise RuntimeError("no tracklets")
+
+            _n_t = len(_tracklets_c)
+            with st.status(f"🧠 Step 4: Re-ID 특징 추출 (0/{_n_t})", expanded=True) as _s4:
+                _feat_bar = st.progress(0.0)
+                _feats_c: list[np.ndarray] = []
+                for _j, _t in enumerate(_tracklets_c):
+                    _tdir = Path(_t["tracklet_dir"])
+                    _crops = _t.get("crop_files", [])
+                    if len(_crops) > 8:
+                        _idx = np.linspace(0, len(_crops) - 1, 8, dtype=int)
+                        _crops = [_crops[k] for k in _idx]
+                    _imgs = [cv2.imread(str(_tdir / c)) for c in _crops]
+                    _imgs = [im for im in _imgs if im is not None]
+                    if _imgs:
+                        _f = _extractor_c.extract_batch_features(_imgs)
+                        _feats_c.append(_f.mean(axis=0))
+                    else:
+                        _feats_c.append(np.zeros(512, dtype=np.float32))
+                    _feat_bar.progress((_j + 1) / _n_t)
+                    _s4.update(label=f"🧠 Step 4: Re-ID 특징 추출 ({_j+1}/{_n_t})")
+                _feats_arr = np.array(_feats_c)
+                _s4.update(
+                    label=f"✅ Step 4: 특징 추출 완료 ({_n_t}개 트랙렛)",
+                    state="complete",
+                )
+            overall_bar.progress(0.75, text="Step 4 완료: 특징 추출")
+
+            # ── Step 5: HAC 클러스터링 ────────────────────────────
+            with st.status("🔗 Step 5: 인물 ID 배정 (HAC 클러스터링)...", expanded=False) as _s5:
+                _pids_c = _run_matching(_tracklets_c, _feats_arr, c_thresh)
+                _n_new_persons = len(set(_pids_c))
+                _s5.update(
+                    label=f"✅ Step 5: 클러스터링 완료 — {_n_new_persons}명 식별",
+                    state="complete",
+                )
+            overall_bar.progress(0.88, text="Step 5 완료: 클러스터링")
+
+            # ── Step 6: 저장 ──────────────────────────────────────
+            with st.status("💾 Step 6: demo_data 저장...", expanded=False) as _s6:
+                # 기존 인물 로드 (append 모드): 백업에서 읽어 경로 문제 회피
+                _existing_persons: list = []
+                _id_offset = 0
+                if c_append:
+                    _src = _manifest_bak if _manifest_bak.exists() else _manifest_src
+                    if _src.exists():
+                        _existing_m = json.loads(_src.read_text(encoding="utf-8"))
+                        _existing_persons = _existing_m.get("persons", [])
+                        _id_offset = max((p["id"] for p in _existing_persons), default=0)
+
+                _pids_offset = [pid + _id_offset for pid in _pids_c]
+                _new_persons = _save_demo_data(
+                    _tracklets_c, _pids_offset, _feats_arr,
+                    out_dir_c, str(tmp_filter_c), cam_slot_start_c,
+                )
+
+                # append 모드면 항상 머지 (existing이 비어있어도 안전하게 처리)
+                if c_append and _existing_persons:
+                    _merged = _existing_persons + _new_persons
+                    _merged_manifest = {
+                        "tracklet_root": str(out_dir_c),
+                        "num_persons": len(_merged),
+                        "persons": _merged,
+                    }
+                    (out_dir_c / "manifest.json").write_text(
+                        json.dumps(_merged_manifest, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+                    _total = len(_merged)
+                else:
+                    _total = len(_new_persons)
+
+                _s6.update(
+                    label=(
+                        f"✅ Step 6: 저장 완료 "
+                        f"— 신규 {len(_new_persons)}명 / 전체 {_total}명"
+                    ),
+                    state="complete",
+                )
+            overall_bar.progress(1.0, text="완료!")
+
+            st.success(
+                f"파이프라인 완료! "
+                f"신규 **{len(_new_persons)}명** 추가 (전체 **{_total}명** 등록)"
+            )
+            st.balloons()
+            load_manifest.clear()
+
+        except RuntimeError:
+            pass  # already shown st.error above
+        except Exception as _exc:
+            st.error(f"파이프라인 실패: {_exc}")
+            st.code(traceback.format_exc())
+        finally:
+            if "tmp_dir_c" in dir():
+                shutil.rmtree(str(tmp_dir_c), ignore_errors=True)
 
 # ── 하단 정보 ─────────────────────────────────────────────────────
 st.divider()

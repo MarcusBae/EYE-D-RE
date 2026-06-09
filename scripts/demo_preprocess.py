@@ -168,10 +168,18 @@ def run_quality_filter(tracklet_dir: Path, filtered_dir: Path, config: dict) -> 
         output_dir=str(filtered_dir),
         copy_crops=True,
         verbose=False,
+        sample_failures=10,
     )
     passed = stats.get("passed", 0)
     total  = stats.get("total", 0)
     print(f"  [필터] {tracklet_dir.name}: {passed}/{total}개 통과")
+    if passed < total:
+        samples = stats.get("failed_samples", [])
+        print(f"  [필터] 탈락 예시 (최대 10개):")
+        for s in samples:
+            tid = s.get("track_id", "?")
+            reasons = ", ".join(s.get("reasons", []))
+            print(f"    track_{tid:04d}: {reasons}")
     return filtered_dir
 
 
