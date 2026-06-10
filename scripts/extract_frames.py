@@ -25,6 +25,8 @@ from pipeline.video_utils import (
 def main():
     parser = argparse.ArgumentParser(description="EYE-D — Frame Extraction")
     parser.add_argument("--config", type=str, default="configs/config.yaml", help="Path to config file")
+    parser.add_argument("--video", type=str, default=None, help="Specific video filename to extract (e.g., cam1_t1.avi)")
+    parser.add_argument("--fps", type=int, default=None, help="Target FPS for frame extraction (defaults to config value)")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing frames")
     args = parser.parse_args()
 
@@ -33,9 +35,16 @@ def main():
 
     video_items = load_videos_from_config(config)
     
+    if args.video:
+        filtered_items = [item for item in video_items if item["filename"] == args.video]
+        if not filtered_items:
+            print(f"[Error] 지정한 비디오 '{args.video}'가 설정 파일에 존재하지 않습니다.")
+            sys.exit(1)
+        video_items = filtered_items
+    
     # data/frames 폴더 경로
     frame_dir = Path(config["data"]["frame_dir"])
-    target_fps = config["frame_extraction"]["target_fps"]
+    target_fps = args.fps if args.fps is not None else config["frame_extraction"]["target_fps"]
     img_fmt = config["frame_extraction"]["image_format"]
     quality = config["frame_extraction"]["jpg_quality"]
 

@@ -66,7 +66,6 @@ class OSNetExtractor:
             if not wp.exists():
                 raise FileNotFoundError(f"가중치 파일을 찾을 수 없습니다: {wp.resolve()}")
             print(f"[INFO] 로컬 가중치 로딩: {wp.name}")
-            import torchreid
             try:
                 import numpy as np
                 torch.serialization.add_safe_globals([np._core.multiarray.scalar])
@@ -76,35 +75,49 @@ class OSNetExtractor:
                 state = torch.load(wp, map_location="cpu", weights_only=True)
             except Exception:
                 state = torch.load(wp, map_location="cpu", weights_only=False)
-            # torchreid checkpoint 형식 대응 (state_dict 키 자동 감지)
             if "state_dict" in state:
                 state = state["state_dict"]
             elif "model" in state:
                 state = state["model"]
-            # module. 프리픽스 제거 (DataParallel 저장 체크포인트 대응)
             state = {k[7:] if k.startswith("module.") else k: v for k, v in state.items()}
-            # 체크포인트에서 num_classes 자동 감지 (classifier.weight 또는 fc.weight)
-            num_classes = 1000
-            for key in ("classifier.weight", "fc.weight"):
-                if key in state:
-                    num_classes = state[key].shape[0]
-                    break
-            print(f"[INFO] 체크포인트 num_classes={num_classes} 감지")
-            model = torchreid.models.build_model(
-                name=model_name,
-                num_classes=num_classes,
-                pretrained=False,
+
+            # 아키텍처 로드
+            # osnet_ain_x1_0 체크포인트 두 종류:
+            #   (A) KaiyangZhou 구버전 Market-1501: IN 없음, 567키, conv2a/b/c/d 명명
+            #       → BoxMOT osnet_x1_0(567키)과 완전 일치
+            #   (B) KaiyangZhou/BoxMOT 신버전 MSMT17 등: IN 포함, 552키, layers.N 명명
+            #       → BoxMOT osnet_ain_x1_0(552키)과 완전 일치
+            # IN 키 유무로 (A)/(B)를 판별해 적합한 아키텍처로 빌드
+            import torchreid
+            has_in = any(".IN." in k for k in state)
+            if model_name == "osnet_ain_x1_0" and not has_in:
+                build_name = "osnet_x1_0"
+            else:
+                build_name = model_name
+            # num_classes는 체크포인트와 맞춰야 classifier도 로드됨
+            classifier_size = next(
+                (v.shape[0] for k, v in state.items() if "classifier" in k and v.dim() == 2),
+                1000,
             )
-            # 모델에 없는 키(InstanceNorm running stats 등) 사전 제거 후 로드
+            model = torchreid.models.build_model(
+                name=build_name, num_classes=classifier_size, pretrained=False
+            )
+            if build_name != model_name:
+                print(f"[INFO] 아키텍처 호환(IN 없음): {model_name} → {build_name} "
+                      f"(num_classes={classifier_size})")
+            else:
+                print(f"[INFO] 아키텍처: {build_name} (num_classes={classifier_size}, "
+                      f"IN={'있음' if has_in else '없음'})")
+
+            # shape 일치하는 키만 선택해 로드 (classifier 클래스 수 불일치 등 자동 제외)
             model_state = model.state_dict()
-            filtered = {k: v for k, v in state.items() if k in model_state}
-            missing = model.load_state_dict(filtered, strict=False)
-            n_missing  = len(missing.missing_keys)
-            n_unexpected = len(missing.unexpected_keys)
-            if n_missing > 0:
-                print(f"[WARN] missing 키 샘플 (처음 5개): {missing.missing_keys[:5]}")
+            compatible = {k: v for k, v in state.items()
+                          if k in model_state and v.shape == model_state[k].shape}
+            model_state.update(compatible)
+            model.load_state_dict(model_state)
+            skipped = len(state) - len(compatible)
             print(f"[INFO] Re-ID pretrained 가중치 로드 완료: {wp.name} "
-                  f"(missing={n_missing}, unexpected={n_unexpected})")
+                  f"({len(compatible)}/{len(state)} 레이어, {skipped}개 스킵)")
             return model
 
         # 2순위: torch.hub 로딩 (ImageNet pretrained)
