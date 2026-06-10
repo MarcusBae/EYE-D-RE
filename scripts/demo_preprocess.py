@@ -266,7 +266,11 @@ def run_matching(tracklets: list, feats: np.ndarray, threshold: float,
 
 # ── 공통: 특징 추출 ───────────────────────────────────────────────
 
-def extract_features(tracklets: list, extractor: OSNetExtractor) -> np.ndarray:
+def extract_features(tracklets: list, extractor: OSNetExtractor,
+                     save_samples_dir: Path | None = None) -> np.ndarray:
+    if save_samples_dir is not None:
+        save_samples_dir.mkdir(parents=True, exist_ok=True)
+
     feats = []
     for t in tqdm(tracklets, desc="  특징 추출"):
         tdir  = Path(t["tracklet_dir"])
@@ -282,6 +286,15 @@ def extract_features(tracklets: list, extractor: OSNetExtractor) -> np.ndarray:
             feats.append(f.mean(axis=0))
         else:
             feats.append(np.zeros(512, dtype=np.float32))
+
+        if save_samples_dir is not None:
+            dst = save_samples_dir / tdir.parent.name / tdir.name
+            dst.mkdir(parents=True, exist_ok=True)
+            for c in crops:
+                src = tdir / c
+                if src.exists():
+                    shutil.copy2(src, dst / src.name)
+
     return np.array(feats)
 
 
@@ -356,6 +369,8 @@ def main():
                         help="매칭 임계값 — 미지정 시 config.yaml reid.clustering.threshold 사용")
     parser.add_argument("--debug", action="store_true",
                         help="클러스터링 단계에서 pairwise 거리 행렬 출력")
+    parser.add_argument("--save-samples", default=None, metavar="DIR",
+                        help="특징 추출에 사용된 8장을 DIR/{cam_slot}/{track}/ 에 저장 (시각화용)")
     parser.add_argument("--match-only", action="store_true",
                         help="캐시된 특징 벡터로 매칭만 재실행 (파라미터 튜닝용). "
                              "--threshold, --debug 와 함께 사용")
@@ -480,7 +495,10 @@ def main():
 
     # 특징 추출
     print("\n[STEP 3] Re-ID 특징 추출")
-    feats = extract_features(tracklets, extractor)
+    samples_dir = Path(args.save_samples) if args.save_samples else None
+    feats = extract_features(tracklets, extractor, save_samples_dir=samples_dir)
+    if samples_dir:
+        print(f"[INFO] 대표 이미지 저장: {samples_dir}")
 
     # 캐시 저장 (--match-only 재실행용)
     np.save(str(out_dir / "_cache_feats.npy"), feats)
