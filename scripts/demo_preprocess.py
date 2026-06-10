@@ -380,8 +380,12 @@ def main():
 
         for _d in (tmp_track, tmp_filter):
             if _d.exists():
-                shutil.rmtree(_d)
-                print(f"[INFO] 기존 폴더 삭제: {_d}")
+                ans = input(f"[WARN] '{_d}' 이미 존재합니다. 삭제하고 새로 시작할까요? [y/N] ").strip().lower()
+                if ans == "y":
+                    shutil.rmtree(_d)
+                    print(f"[INFO] 폴더 삭제: {_d}")
+                else:
+                    print(f"[INFO] 기존 폴더 유지: {_d}")
 
         print("\n[STEP 1] 트래킹")
         for vp in video_paths:
