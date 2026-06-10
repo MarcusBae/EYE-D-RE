@@ -277,7 +277,7 @@ def extract_features(tracklets: list, extractor: OSNetExtractor,
         crops = t.get("crop_files", [])
         max_n = 8
         if len(crops) > max_n:
-            idx   = np.linspace(0, len(crops) - 1, max_n, dtype=int)
+            idx   = np.linspace(0, len(crops) - 1, max_n + 2, dtype=int)[1:-1]
             crops = [crops[i] for i in idx]
         imgs = [cv2.imread(str(tdir / c)) for c in crops]
         imgs = [img for img in imgs if img is not None]
