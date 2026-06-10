@@ -38,13 +38,38 @@ demo_app.py 가 읽는 data/demo_data/ 를 생성하는 전처리 스크립트.
 
 ──────────────────────────────────────────────────────────────
 주요 옵션
-  --config   configs/config.yaml 경로 (기본: configs/config.yaml)
-  --data     출력 루트 (기본: data/demo_data)
-  --tracklets  트랙렛 소스 디렉터리 (기본: data/curated)
-  --slots    처리할 cam_slot 폴더 이름 목록 (모드 1, 미지정 시 전체)
-  --videos   처리할 영상 파일 경로 목록 (모드 2)
+  --config     configs/config.yaml 경로 (기본: configs/config.yaml)
+  --out        출력 루트 (기본: data/demo_data)
+  --tracklets-dir  트랙렛 소스 디렉터리 (기본: data/curated)
+  --slots      처리할 cam_slot 폴더 이름 목록 (모드 1, 미지정 시 전체)
+  --videos     처리할 영상 파일 경로 목록 (모드 2)
   --threshold  HAC 병합 임계값 cosine distance (기본: config 값)
-  --force    기존 demo_data 를 지우고 재생성
+  --debug      pairwise 거리 행렬 및 클러스터 구성 출력
+  --match-only 캐시된 특징 벡터로 매칭만 재실행 (파라미터 튜닝용, 아래 참고)
+
+──────────────────────────────────────────────────────────────
+[매칭 파라미터 튜닝] --match-only 활용법
+
+  특징 추출(수 분)은 건너뛰고 run_matching() 만 반복 실행할 수 있음.
+  전체 파이프라인을 한 번 실행하면 특징 벡터가 캐시로 저장됨:
+    data/demo_data/_cache_feats.npy
+    data/demo_data/_cache_tracklets.json
+
+  이후 --match-only 로 매칭만 즉시 재실행:
+
+    # threshold 값만 바꿔서 결과 확인
+    python scripts/demo_preprocess.py --match-only --threshold 0.25
+
+    # 거리 행렬 + 클러스터 구성 상세 출력
+    python scripts/demo_preprocess.py --match-only --threshold 0.20 --debug
+
+    # 더 느슨하게 병합 (같은 사람으로 묶이는 트랙렛 증가)
+    python scripts/demo_preprocess.py --match-only --threshold 0.35 --debug
+
+  threshold 가이드:
+    낮을수록 (0.10~0.20) 보수적 — 다른 사람으로 분리
+    높을수록 (0.30~0.45) 관대함 — 같은 사람으로 병합
+    현재 config 기본값: reid.clustering.threshold
 
 ──────────────────────────────────────────────────────────────
 """
@@ -197,26 +222,29 @@ def run_matching(tracklets: list, feats: np.ndarray, threshold: float,
 
     if debug:
         dist_mat = cdist(feats_norm, feats_norm, metric="cosine")
+
+        def _tid(t: dict) -> str:
+            p = Path(t["tracklet_dir"])
+            return f"{p.parent.name}/{p.name}"
+
         print(f"\n[DEBUG run_matching] 트랙렛 {len(tracklets)}개 / threshold={threshold}")
         print(f"[DEBUG] 특징 벡터 norm 범위: min={norms.min():.4f}  max={norms.max():.4f}")
         print("[DEBUG] pairwise cosine distance matrix:")
-        labels_w = max(len(Path(t['tracklet_dir']).name) for t in tracklets)
+        labels_w = max(len(_tid(t)) for t in tracklets)
         header = " " * (labels_w + 2) + "  ".join(
-            Path(t["tracklet_dir"]).name[-8:] for t in tracklets
+            _tid(t)[-10:] for t in tracklets
         )
         print(header)
         for i, t in enumerate(tracklets):
             row = "  ".join(f"{dist_mat[i,j]:.3f}" for j in range(len(tracklets)))
-            print(f"  {Path(t['tracklet_dir']).name[-labels_w:]}  {row}")
+            print(f"  {_tid(t):<{labels_w}}  {row}")
         print(f"[DEBUG] threshold={threshold} 기준으로 병합될 쌍 (dist < threshold):")
         merged = [(i, j) for i in range(len(tracklets))
                   for j in range(i+1, len(tracklets))
                   if dist_mat[i, j] < threshold]
         if merged:
             for i, j in merged:
-                n_i = Path(tracklets[i]["tracklet_dir"]).name
-                n_j = Path(tracklets[j]["tracklet_dir"]).name
-                print(f"    {n_i} ↔ {n_j}  dist={dist_mat[i,j]:.4f}")
+                print(f"    {_tid(tracklets[i])} ↔ {_tid(tracklets[j])}  dist={dist_mat[i,j]:.4f}")
         else:
             print("    (없음 — 모든 트랙렛이 별도 클러스터)")
 
@@ -229,7 +257,7 @@ def run_matching(tracklets: list, feats: np.ndarray, threshold: float,
         cluster_counts = Counter(int(l) for l in labels)
         print(f"[DEBUG] 클러스터 결과: {len(cluster_counts)}개 클러스터")
         for cid, cnt in sorted(cluster_counts.items()):
-            members = [Path(tracklets[i]["tracklet_dir"]).name
+            members = [_tid(tracklets[i])
                        for i, l in enumerate(labels) if int(l) == cid]
             print(f"    cluster {cid}: {cnt}개 트랙렛 → {members}")
 
@@ -328,6 +356,9 @@ def main():
                         help="매칭 임계값 — 미지정 시 config.yaml reid.clustering.threshold 사용")
     parser.add_argument("--debug", action="store_true",
                         help="클러스터링 단계에서 pairwise 거리 행렬 출력")
+    parser.add_argument("--match-only", action="store_true",
+                        help="캐시된 특징 벡터로 매칭만 재실행 (파라미터 튜닝용). "
+                             "--threshold, --debug 와 함께 사용")
     parser.add_argument("--out", default="data/demo_data")
     args = parser.parse_args()
 
@@ -339,6 +370,25 @@ def main():
         args.threshold = float(reid_cfg.get("clustering", {}).get("threshold", 0.30))
         print(f"[INFO] threshold = {args.threshold} (config.yaml 기준)")
     out_dir    = Path(args.out)
+
+    # ── --match-only: 캐시된 특징으로 매칭만 재실행 ──────────────
+    if args.match_only:
+        cache_feats = out_dir / "_cache_feats.npy"
+        cache_meta  = out_dir / "_cache_tracklets.json"
+        if not cache_feats.exists() or not cache_meta.exists():
+            sys.exit(f"[ERROR] 캐시 없음. 먼저 전체 파이프라인을 실행하세요.\n"
+                     f"  필요 파일: {cache_feats}, {cache_meta}")
+        feats      = np.load(str(cache_feats))
+        tracklets  = json.loads(cache_meta.read_text(encoding="utf-8"))
+        cam_slot_start = build_cam_slot_start(config)
+        print(f"[INFO] 캐시 로드: {len(tracklets)}개 트랙렛, feats={feats.shape}")
+        print(f"[INFO] threshold={args.threshold}, debug={args.debug}")
+        person_ids = run_matching(tracklets, feats, args.threshold, debug=args.debug)
+        persons    = save_demo_data(tracklets, person_ids, feats, out_dir,
+                                    tracklets[0]["tracklet_dir"].rsplit("/", 2)[0] if tracklets else "",
+                                    cam_slot_start=cam_slot_start)
+        print(f"\n완료: {len(persons)}명 / {len(tracklets)}개 트랙렛")
+        return
 
     # 출력 폴더 초기화
     if out_dir.exists():
@@ -431,6 +481,13 @@ def main():
     # 특징 추출
     print("\n[STEP 3] Re-ID 특징 추출")
     feats = extract_features(tracklets, extractor)
+
+    # 캐시 저장 (--match-only 재실행용)
+    np.save(str(out_dir / "_cache_feats.npy"), feats)
+    (out_dir / "_cache_tracklets.json").write_text(
+        json.dumps(tracklets, ensure_ascii=False), encoding="utf-8"
+    )
+    print(f"[INFO] 특징 캐시 저장: {out_dir}/_cache_feats.npy")
 
     # person_id 결정
     has_global_id = all(t.get("global_id") is not None for t in tracklets)
