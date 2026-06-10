@@ -188,6 +188,7 @@ def main():
     extractor = OSNetExtractor(
         model_name=reid_cfg.get("model_name", "osnet_x1_0"),
         pretrained=reid_cfg.get("pretrained", True),
+            weights_path=reid_cfg.get("weights_path", None),
         device=reid_cfg.get("device", "auto"),
     )
 
