@@ -4,7 +4,21 @@ merge_ids.py
 ============
 CCTV 트랙렛들의 OSNet 외형 피처를 추출하고, 
 동시성 제약 조건이 가미된 HAC(Hierarchical Agglomerative Clustering)를 사용해
-카메라 간 동일인 ID를 매핑(Global ID 병합)하는 배치 실행 스크립트.
+Global ID 병합하는 배치 실행 스크립트.
+
+입력 (Input):
+    1. 설정 파일 (configs/config.yaml): 데이터 경로 및 클러스터링 임계값 정보 등
+    2. 품질 필터 통과 트랙렛 폴더 (data/filtered/{camera_id}_{time_slot}/track_{NNNN}/):
+        - frame_XXXXXX.jpg: 보행자 크롭 이미지들
+        - metadata.json: 트랙렛 정보 (기본 카메라, 시간대 등 포함)
+    3. Re-ID 모델 가중치 (OSNet 모델 가중치)
+
+출력 (Output):
+    1. 업데이트된 metadata.json:
+        - 각 트랙렛 폴더 안의 metadata.json 파일에 "global_id" 필드(동일인 식별 ID)가 추가 및 기록됩니다.
+        - 제외된 트랙렛에는 global_id가 -1로 설정됩니다.
+    2. 콘솔 통계:
+        - 병합 전후의 ID 개수 비교, ID 병합 압축률, 상위 Global ID별 카메라 분산 매핑 통계 등 출력
 """
 
 from __future__ import annotations

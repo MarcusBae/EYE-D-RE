@@ -102,12 +102,22 @@ def analyze_cluster(tracklets: list[dict], extractor: OSNetExtractor,
     # pairwise cosine 유사도 (이미 L2 정규화됨 → 내적)
     sim_matrix = feat_matrix @ feat_matrix.T
     n = len(feats)
-    pair_sims = [
-        float(sim_matrix[i, j])
-        for i, j in combinations(range(n), 2)
-    ]
+    pair_sims = []
+    contaminated_details = []
 
-    contaminated_pairs = sum(1 for s in pair_sims if s < sim_threshold)
+    for i, j in combinations(range(n), 2):
+        sim = float(sim_matrix[i, j])
+        pair_sims.append(sim)
+        if sim < sim_threshold:
+            dir_i = f"{feats[i][0]['tdir'].parent.name}/{feats[i][0]['tdir'].name}"
+            dir_j = f"{feats[j][0]['tdir'].parent.name}/{feats[j][0]['tdir'].name}"
+            contaminated_details.append({
+                "t1": dir_i,
+                "t2": dir_j,
+                "similarity": round(sim, 4)
+            })
+
+    contaminated_pairs = len(contaminated_details)
     total_pairs = len(pair_sims)
 
     return {
@@ -119,6 +129,7 @@ def analyze_cluster(tracklets: list[dict], extractor: OSNetExtractor,
         "contaminated_pairs": contaminated_pairs,
         "contamination_rate": round(contaminated_pairs / total_pairs, 4),
         "tracklets": tracklet_info,
+        "contaminated_details": contaminated_details,
     }
 
 
@@ -127,9 +138,9 @@ def print_report(results: list[dict], sim_threshold: float):
     contaminated = [r for r in results if r["contamination_rate"] > 0]
 
     print()
-    print("=" * 60)
+    print("=" * 70)
     print("  클러스터 내 유사도 분석 결과")
-    print("=" * 60)
+    print("=" * 70)
     print(f"  분석된 클러스터 수 : {total}개")
     print(f"  유사도 임계값      : {sim_threshold:.2f}  (이 미만 = 오병합 의심)")
     print(f"  오염 클러스터 수   : {len(contaminated)}개 "
@@ -137,16 +148,20 @@ def print_report(results: list[dict], sim_threshold: float):
     print()
     print(f"  {'Global ID':>10}  {'트랙렛':>5}  {'min sim':>8}  "
           f"{'mean sim':>9}  {'오염 쌍':>7}  {'오염율':>7}")
-    print("  " + "-" * 56)
+    print("  " + "-" * 66)
     for r in results[:30]:  # 상위 30개만 출력
         flag = " !" if r["contamination_rate"] > 0.3 else ""
         print(f"  {r['global_id']:>10}  {r['num_tracklets']:>5}  "
               f"{r['sim_min']:>8.3f}  {r['sim_mean']:>9.3f}  "
               f"{r['contaminated_pairs']:>5}/{r['num_pairs']:<5}"
               f"  {r['contamination_rate']:>6.1%}{flag}")
+        if r["contaminated_pairs"] > 0:
+            for pair in r.get("contaminated_details", []):
+                print(f"      ⤷ [오염쌍] {pair['t1']} ↔ {pair['t2']} (유사도: {pair['similarity']:.3f})")
+            print() # 가독성을 위한 개행
     if len(results) > 30:
         print(f"  ... (나머지 {len(results) - 30}개는 JSON 파일 참조)")
-    print("=" * 60)
+    print("=" * 70)
 
 
 def main():
@@ -188,6 +203,7 @@ def main():
     extractor = OSNetExtractor(
         model_name=reid_cfg.get("model_name", "osnet_x1_0"),
         pretrained=reid_cfg.get("pretrained", True),
+        weights_path=reid_cfg.get("weights_path"),
         device=reid_cfg.get("device", "auto"),
     )
 
