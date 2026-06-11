@@ -26,6 +26,8 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+
+import numpy as np
 import yaml
 
 # 프로젝트 루트 경로 추가 (src 모듈 임포트용)
@@ -37,6 +39,37 @@ from pipeline.tracklet_io import list_tracklets
 from pipeline.reid_merger import CrossCameraMerger
 
 
+def _load_feature_cache(cache_path: Path, tracklets: list) -> list | None:
+    """캐시가 존재하고 트랙렛 목록이 일치하면 특징 벡터 리스트 반환, 아니면 None."""
+    if not cache_path.exists():
+        return None
+    try:
+        data = np.load(cache_path, allow_pickle=True)
+        cached_dirs = data["tracklet_dirs"].tolist()
+        current_dirs = [t["tracklet_dir"] for t in tracklets]
+        if cached_dirs != current_dirs:
+            print("[INFO] 캐시 트랙렛 목록 불일치 → 재추출")
+            return None
+        print(f"[INFO] 특징 캐시 로드: {cache_path}  ({len(tracklets)}개 트랙렛)")
+        return list(data["features"])
+    except Exception as e:
+        print(f"[WARN] 캐시 로드 실패 ({e}) → 재추출")
+        return None
+
+
+def _save_feature_cache(cache_path: Path, features: list, tracklets: list) -> None:
+    """특징 벡터 리스트를 npz 파일로 저장."""
+    features_arr = np.empty(len(features), dtype=object)
+    for i, f in enumerate(features):
+        features_arr[i] = f
+    np.savez(
+        cache_path,
+        features=features_arr,
+        tracklet_dirs=np.array([t["tracklet_dir"] for t in tracklets]),
+    )
+    print(f"[INFO] 특징 캐시 저장: {cache_path}  ({len(features)}개 트랙렛)")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Cross-camera ID Merger (Phase 1E)")
     parser.add_argument(
@@ -44,6 +77,11 @@ def main():
         type=str,
         default="configs/config.yaml",
         help="Path to global configuration YAML file"
+    )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="캐시를 무시하고 특징 벡터를 강제 재추출"
     )
     args = parser.parse_args()
 
@@ -57,6 +95,14 @@ def main():
         config = yaml.safe_load(f)
 
     filtered_dir = config.get("data", {}).get("filtered_dir", "data/filtered")
+    cluster_cfg = config.get("reid", {}).get("clustering", {})
+    threshold = cluster_cfg.get("threshold", 0.5)
+    allow_cross_slot = cluster_cfg.get("allow_cross_slot", False)
+
+    print(f"[INFO] 작업 대상 폴더    : {filtered_dir}")
+    print(f"[INFO] HAC threshold     : {threshold}")
+    print(f"[INFO] allow_cross_slot  : {allow_cross_slot}")
+    print()
     print(f"[INFO] 1단계: 정제 완료된 트랙렛 폴더 스캔: {filtered_dir}")
 
     # 2. 정제 완료된 트랙렛 리스트 수집
@@ -67,15 +113,23 @@ def main():
 
     print(f"[INFO] 총 {len(tracklets)}개의 정제된 트랙렛이 탐색되었습니다.")
 
-    # 3. Merger 초기화 및 피처 추출
+    # 3. Merger 초기화 및 피처 추출 (캐시 활용)
     merger = CrossCameraMerger(config)
 
-    try:
-        raw_features = merger.extract_tracklet_representative_features(tracklets)
-    except Exception as e:
-        print(f"[ERROR] 특징 추출 중 오류 발생: {e}")
-        print("[TIP] PyTorch Hub 연결 오류인 경우, 인터넷 연결을 확인하거나 torchreid 패키지를 가상환경에 설치해 주세요.")
-        sys.exit(1)
+    cache_path = Path(filtered_dir) / ".feature_cache.npz"
+    raw_features = None
+
+    if not args.no_cache:
+        raw_features = _load_feature_cache(cache_path, tracklets)
+
+    if raw_features is None:
+        try:
+            raw_features = merger.extract_tracklet_representative_features(tracklets)
+        except Exception as e:
+            print(f"[ERROR] 특징 추출 중 오류 발생: {e}")
+            print("[TIP] PyTorch Hub 연결 오류인 경우, 인터넷 연결을 확인하거나 torchreid 패키지를 가상환경에 설치해 주세요.")
+            sys.exit(1)
+        _save_feature_cache(cache_path, raw_features, tracklets)
 
     # [P2-1] 이미지 로드 불가 트랙렛 분리
     valid_tracklets, valid_features, skipped_tracklets = merger.filter_valid_tracklets(tracklets, raw_features)

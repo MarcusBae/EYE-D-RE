@@ -100,8 +100,8 @@ reid:
   batch_size: 64
   # HAC(Hierarchical Agglomerative Clustering) 하이퍼파라미터
   clustering:
-    threshold: 0.20     # Cosine Distance 병합 임계치 (높을수록 더 쉽게 병합됨, 낮을수록 보수적)
-    split_threshold: 0.25 # tracklet 내부 분리 임계치 (이 값 초과 시 두 사람으로 분리)
+    threshold: 0.15     # Cosine Distance 병합 임계치 (높을수록 더 쉽게 병합됨, 낮을수록 보수적)
+    allow_cross_slot: true  # 슬롯 간 동일인 병합 허용 (절대 시간 기반 충돌 감지로 over-merge 방지)
     metric: "cosine"
     linkage: "average" # average | complete | single
 

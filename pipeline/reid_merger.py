@@ -66,6 +66,7 @@ class OSNetExtractor:
             if not wp.exists():
                 raise FileNotFoundError(f"가중치 파일을 찾을 수 없습니다: {wp.resolve()}")
             print(f"[INFO] 로컬 가중치 로딩: {wp.name}")
+            import torchreid
             try:
                 import numpy as np
                 torch.serialization.add_safe_globals([np._core.multiarray.scalar])
@@ -75,49 +76,36 @@ class OSNetExtractor:
                 state = torch.load(wp, map_location="cpu", weights_only=True)
             except Exception:
                 state = torch.load(wp, map_location="cpu", weights_only=False)
+            # torchreid checkpoint 형식 대응 (state_dict 키 자동 감지)
             if "state_dict" in state:
                 state = state["state_dict"]
             elif "model" in state:
                 state = state["model"]
+            # module. 프리픽스 제거 (DataParallel 저장 체크포인트 대응)
             state = {k[7:] if k.startswith("module.") else k: v for k, v in state.items()}
-
-            # 아키텍처 로드
-            # osnet_ain_x1_0 체크포인트 두 종류:
-            #   (A) KaiyangZhou 구버전 Market-1501: IN 없음, 567키, conv2a/b/c/d 명명
-            #       → BoxMOT osnet_x1_0(567키)과 완전 일치
-            #   (B) KaiyangZhou/BoxMOT 신버전 MSMT17 등: IN 포함, 552키, layers.N 명명
-            #       → BoxMOT osnet_ain_x1_0(552키)과 완전 일치
-            # IN 키 유무로 (A)/(B)를 판별해 적합한 아키텍처로 빌드
-            import torchreid
-            has_in = any(".IN." in k for k in state)
-            if model_name == "osnet_ain_x1_0" and not has_in:
-                build_name = "osnet_x1_0"
-            else:
-                build_name = model_name
-            # num_classes는 체크포인트와 맞춰야 classifier도 로드됨
-            classifier_size = next(
-                (v.shape[0] for k, v in state.items() if "classifier" in k and v.dim() == 2),
-                1000,
-            )
+            # 체크포인트에서 num_classes 자동 감지 (classifier.weight 또는 fc.weight)
+            num_classes = 1000
+            for key in ("classifier.weight", "fc.weight"):
+                if key in state:
+                    num_classes = state[key].shape[0]
+                    break
+            print(f"[INFO] 체크포인트 num_classes={num_classes} 감지")
             model = torchreid.models.build_model(
-                name=build_name, num_classes=classifier_size, pretrained=False
+                name=model_name,
+                num_classes=num_classes,
+                pretrained=False,
             )
-            if build_name != model_name:
-                print(f"[INFO] 아키텍처 호환(IN 없음): {model_name} → {build_name} "
-                      f"(num_classes={classifier_size})")
-            else:
-                print(f"[INFO] 아키텍처: {build_name} (num_classes={classifier_size}, "
-                      f"IN={'있음' if has_in else '없음'})")
-
-            # shape 일치하는 키만 선택해 로드 (classifier 클래스 수 불일치 등 자동 제외)
+            # 모델에 없는 키(InstanceNorm running stats 등) 사전 제거 후 로드
             model_state = model.state_dict()
-            compatible = {k: v for k, v in state.items()
-                          if k in model_state and v.shape == model_state[k].shape}
-            model_state.update(compatible)
-            model.load_state_dict(model_state)
-            skipped = len(state) - len(compatible)
+            filtered = {k: v for k, v in state.items()
+                        if k in model_state and v.shape == model_state[k].shape}
+            missing = model.load_state_dict(filtered, strict=False)
+            n_missing  = len(missing.missing_keys)
+            n_unexpected = len(missing.unexpected_keys)
+            if n_missing > 0:
+                print(f"[WARN] missing 키 샘플 (처음 5개): {missing.missing_keys[:5]}")
             print(f"[INFO] Re-ID pretrained 가중치 로드 완료: {wp.name} "
-                  f"({len(compatible)}/{len(state)} 레이어, {skipped}개 스킵)")
+                  f"(missing={n_missing}, unexpected={n_unexpected})")
             return model
 
         # 2순위: torch.hub 로딩 (ImageNet pretrained)
@@ -301,16 +289,51 @@ class CrossCameraMerger:
         if skipped_tracklets:
             print(f"[INFO] {len(skipped_tracklets)}개 트랙렛에 global_id = -1 마킹 완료")
 
+    def _get_start_time(self, camera_id: int, time_slot: int) -> str:
+        """config videos 섹션에서 (camera, slot) 매칭되는 start_time 반환."""
+        for info in self.config.get("videos", {}).values():
+            if info.get("camera") == camera_id and info.get("slot") == time_slot:
+                return info.get("start_time", "00:00:00")
+        return "00:00:00"
+
+    def _get_absolute_seconds(self, frame_idx: int, fps: float, start_time_str: str) -> float:
+        """시작 시간(HH:MM:SS)과 프레임 인덱스, fps를 기반으로 자정 이후의 절대 초(seconds)를 계산."""
+        try:
+            parts = start_time_str.split(":")
+            if len(parts) == 3:
+                h, m, s = map(int, parts)
+            else:
+                h, m, s = 0, 0, 0
+        except Exception:
+            h, m, s = 0, 0, 0
+        start_seconds = h * 3600 + m * 60 + s
+        return start_seconds + (frame_idx / fps)
+
     def _has_conflict(self, t1: Dict, t2: Dict) -> bool:
-        """두 트랙렛이 must-not-link 관계인지 확인 (동일 cam+slot + 프레임 겹침)."""
+        """두 트랙렛이 must-not-link 관계인지 확인 (동일 카메라 및 실제 시간 기준 동시성 판단)."""
         # 시간대 교차 병합 금지(over-merge 방지, ID 046 사례)
         if not self.allow_cross_slot and t1["time_slot"] != t2["time_slot"]:
             return True
-        if t1["camera_id"] != t2["camera_id"] or t1["time_slot"] != t2["time_slot"]:
+        if t1["camera_id"] != t2["camera_id"]:
             return False
-        f1_min, f1_max = min(t1["frame_indices"]), max(t1["frame_indices"])
-        f2_min, f2_max = min(t2["frame_indices"]), max(t2["frame_indices"])
-        return max(f1_min, f2_min) <= min(f1_max, f2_max)
+
+        f1_indices = t1.get("frame_indices", [])
+        f2_indices = t2.get("frame_indices", [])
+        if not f1_indices or not f2_indices:
+            return False
+
+        fps1 = t1.get("src_fps", 24.0)
+        fps2 = t2.get("src_fps", 24.0)
+        
+        start1_str = self._get_start_time(t1["camera_id"], t1["time_slot"])
+        start2_str = self._get_start_time(t2["camera_id"], t2["time_slot"])
+
+        t1_start = self._get_absolute_seconds(min(f1_indices), fps1, start1_str)
+        t1_end = self._get_absolute_seconds(max(f1_indices), fps1, start1_str)
+        t2_start = self._get_absolute_seconds(min(f2_indices), fps2, start2_str)
+        t2_end = self._get_absolute_seconds(max(f2_indices), fps2, start2_str)
+
+        return max(t1_start, t2_start) <= min(t1_end, t2_end)
 
     def enforce_must_not_link(self, labels: np.ndarray, tracklets: List[Dict]) -> np.ndarray:
         """HAC 결과에서 제약 위반 클러스터를 greedy split으로 강제 분리.
@@ -389,7 +412,7 @@ class CrossCameraMerger:
     def apply_must_not_link_constraints(self, dist_matrix: np.ndarray, tracklets: List[Dict]) -> np.ndarray:
         """
         Must-not-link Constraint (동시성 제약 조건)을 거리 행렬에 적용.
-        동일한 카메라/시간대에서 시간축(프레임 번호)이 겹치는 트랙렛 쌍의 거리를 최댓값(999.0)으로 대체.
+        동일한 카메라에서 실제 시간(시작 시간 + 프레임 인덱스)이 겹치는 트랙렛 쌍의 거리를 최댓값(999.0)으로 대체.
         """
         n = len(tracklets)
         constrained_matrix = dist_matrix.copy()
@@ -397,28 +420,12 @@ class CrossCameraMerger:
         constraint_count = 0
         for i in range(n):
             t1 = tracklets[i]
-            cam1 = t1["camera_id"]
-            slot1 = t1["time_slot"]
-            f1_min, f1_max = min(t1["frame_indices"]), max(t1["frame_indices"])
-            
             for j in range(i + 1, n):
                 t2 = tracklets[j]
-                # (신규) 시간대 교차 병합 금지 (over-merge 방지)
-                if not self.allow_cross_slot and slot1 != t2["time_slot"]:
+                if self._has_conflict(t1, t2):
                     constrained_matrix[i, j] = 999.0
                     constrained_matrix[j, i] = 999.0
                     constraint_count += 1
-                    continue
-                # 동일 카메라 및 동일 슬롯인지 확인
-                if cam1 == t2["camera_id"] and slot1 == t2["time_slot"]:
-                    # 프레임 구간이 겹치는지 체크
-                    f2_min, f2_max = min(t2["frame_indices"]), max(t2["frame_indices"])
-                    
-                    if max(f1_min, f2_min) <= min(f1_max, f2_max):
-                        # 프레임 구간이 겹친다면 절대 병합될 수 없으므로 무한에 가까운 거리를 부여
-                        constrained_matrix[i, j] = 999.0
-                        constrained_matrix[j, i] = 999.0
-                        constraint_count += 1
                         
         print(f"[INFO] 동시성 제약 조건(Must-not-link) 적용 완료: {constraint_count}개 쌍 감지 및 차단")
         return constrained_matrix
@@ -446,22 +453,15 @@ class CrossCameraMerger:
             # 동일 클러스터 내의 모든 트랙렛 쌍에 대해 동시성 겹침 검사
             for i in range(len(idxs)):
                 t1 = tracklets[idxs[i]]
-                cam1 = t1["camera_id"]
-                slot1 = t1["time_slot"]
-                f1_min, f1_max = min(t1["frame_indices"]), max(t1["frame_indices"])
-                
                 for j in range(i + 1, len(idxs)):
                     t2 = tracklets[idxs[j]]
-                    if cam1 == t2["camera_id"] and slot1 == t2["time_slot"]:
-                        f2_min, f2_max = min(t2["frame_indices"]), max(t2["frame_indices"])
-                        if max(f1_min, f2_min) <= min(f1_max, f2_max):
-                            print(
-                                f"[ERROR] 제약 조건 위반 발생! Global ID {label} 내부에서 "
-                                f"동일 비디오(c{cam1}_t{slot1}) 겹침 트랙렛 병합됨: "
-                                f"Track_{t1['track_id']:04d} (frame {f1_min}~{f1_max}) vs "
-                                f"Track_{t2['track_id']:04d} (frame {f2_min}~{f2_max})"
-                            )
-                            success = False
+                    if self._has_conflict(t1, t2):
+                        print(
+                            f"[ERROR] 제약 조건 위반 발생! Global ID {label} 내부에서 "
+                            f"동일 카메라(c{t1['camera_id']}) 내 겹침 트랙렛 병합됨: "
+                            f"Track_{t1['track_id']:04d} vs Track_{t2['track_id']:04d}"
+                        )
+                        success = False
         return success
 
     def update_tracklet_metadata_with_global_id(self, tracklets: List[Dict], labels: np.ndarray):
