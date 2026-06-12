@@ -24,6 +24,43 @@ from tqdm import tqdm
 from .detector import auto_device
 from .tracklet_io import save_tracklet
 
+VIDEO_PROGRESS_FILE = "_tracking_progress.json"
+
+
+def _save_tracklets_to_disk(
+    tracklets: Dict,
+    camera_id: int,
+    time_slot: int,
+    video_path: str,
+    src_fps: float,
+    frame_stride: int,
+    save_crops: bool,
+    out_video_dir: Path,
+) -> int:
+    """tracklets 딕셔너리의 모든 항목을 디스크에 저장하고 딕셔너리를 비운다. 저장된 트랙 수 반환."""
+    saved = 0
+    for tid in list(tracklets.keys()):
+        entries = tracklets.pop(tid)
+        if not entries:
+            continue
+        crops = [e.pop("_crop") for e in entries] if save_crops else None
+        metadata = {
+            "track_id": int(tid),
+            "camera_id": int(camera_id),
+            "time_slot": int(time_slot),
+            "src_video": video_path,
+            "src_fps": float(src_fps),
+            "frame_stride": int(frame_stride),
+            "length": len(entries),
+            "frame_indices": [e["frame_idx"] for e in entries],
+            "bboxes": [e["bbox"] for e in entries],
+            "confidences": [e["conf"] for e in entries],
+            "avg_conf": float(np.mean([e["conf"] for e in entries])),
+        }
+        save_tracklet(tid, crops, metadata, out_video_dir)
+        saved += 1
+    return saved
+
 
 class PersonTracker:
     """
@@ -75,6 +112,8 @@ class PersonTracker:
         frame_stride: int = 1,
         save_crops: bool = True,
         progress_callback=None,
+        checkpoint_every: int = 500,
+        resume_from: Optional[dict] = None,
     ) -> Dict:
         """
         영상 1개에 대해 트래킹 → tracklet 단위 저장.
@@ -88,6 +127,8 @@ class PersonTracker:
                      (`output_dir/c{cam}_t{slot}/track_{id:04d}/` 구조로 저장됨)
         frame_stride : 매 N프레임만 트래킹 (5fps 등가 효과). 1=모든 프레임.
         save_crops : tracklet 각 frame의 person crop 이미지 저장 여부
+        checkpoint_every : 처리된 프레임 N개마다 중간 체크포인트 저장. 0=비활성.
+        resume_from : _load_video_progress()로 읽은 체크포인트 dict. None=처음부터.
 
         Returns
         -------
@@ -108,9 +149,28 @@ class PersonTracker:
         # track_id → list of dict(frame_idx, bbox, conf, crop)
         tracklets: Dict[int, List[dict]] = defaultdict(list)
 
+        # 재개 설정
         frame_idx = 0
         processed = 0
-        pbar = tqdm(total=total_frames, desc=f"  track c{camera_id}_t{time_slot}", leave=False)
+        total_saved = 0
+        id_offset = 0
+        max_used_id = 0
+
+        if resume_from:
+            frame_idx = resume_from["frame_idx"]
+            processed = resume_from["processed"]
+            total_saved = resume_from["flushed_count"]
+            id_offset = resume_from["max_track_id"] + 10000
+            max_used_id = id_offset
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            print(f"   [Resume] 프레임 {frame_idx} / {total_frames}부터 재개 (ID offset={id_offset})")
+
+        pbar = tqdm(
+            total=total_frames,
+            initial=frame_idx,
+            desc=f"  track c{camera_id}_t{time_slot}",
+            leave=False,
+        )
         _cb_interval = max(1, total_frames // 200)
 
         while True:
@@ -139,6 +199,10 @@ class PersonTracker:
                     confs = r.boxes.conf.cpu().numpy().astype(np.float32)
 
                     for tid, bbox, conf in zip(ids, bboxes, confs):
+                        actual_tid = int(tid) + id_offset
+                        if actual_tid > max_used_id:
+                            max_used_id = actual_tid
+
                         x1, y1, x2, y2 = [int(v) for v in bbox]
                         # bbox clamping
                         h, w = frame.shape[:2]
@@ -146,7 +210,7 @@ class PersonTracker:
                         x2c, y2c = min(w, x2), min(h, y2)
                         if x2c <= x1c or y2c <= y1c:
                             continue
-                        
+
                         entry = {
                             "frame_idx": int(frame_idx),
                             "bbox": [int(x1), int(y1), int(x2), int(y2)],
@@ -154,40 +218,48 @@ class PersonTracker:
                         }
                         if save_crops:
                             entry["_crop"] = frame[y1c:y2c, x1c:x2c].copy()
-                        
-                        tracklets[int(tid)].append(entry)
+
+                        tracklets[actual_tid].append(entry)
                 processed += 1
+
             frame_idx += 1
             pbar.update(1)
             if progress_callback and frame_idx % _cb_interval == 0:
                 progress_callback(frame_idx, total_frames)
+
+            # 영상 내 체크포인트
+            if checkpoint_every > 0 and processed > 0 and processed % checkpoint_every == 0:
+                n = _save_tracklets_to_disk(
+                    tracklets, camera_id, time_slot, video_path, src_fps,
+                    frame_stride, save_crops, out_video_dir,
+                )
+                total_saved += n
+                progress = {
+                    "frame_idx": frame_idx,
+                    "processed": processed,
+                    "max_track_id": max_used_id,
+                    "flushed_count": total_saved,
+                }
+                with open(out_video_dir / VIDEO_PROGRESS_FILE, "w", encoding="utf-8") as f:
+                    json.dump(progress, f, indent=2, ensure_ascii=False)
+                print(f"\n   [Checkpoint] 프레임 {frame_idx}/{total_frames} — {total_saved}개 tracklet 저장됨")
+
         if progress_callback:
             progress_callback(total_frames, total_frames)
         pbar.close()
         cap.release()
 
-        # tracklet 단위 저장
-        saved_tracks = 0
-        for tid, entries in tracklets.items():
-            if len(entries) == 0:
-                continue
-            
-            crops = [e.pop("_crop") for e in entries] if save_crops else None
-            metadata = {
-                "track_id": int(tid),
-                "camera_id": int(camera_id),
-                "time_slot": int(time_slot),
-                "src_video": video_path,
-                "src_fps": float(src_fps),
-                "frame_stride": int(frame_stride),
-                "length": len(entries),
-                "frame_indices": [e["frame_idx"] for e in entries],
-                "bboxes": [e["bbox"] for e in entries],
-                "confidences": [e["conf"] for e in entries],
-                "avg_conf": float(np.mean([e["conf"] for e in entries])),
-            }
-            save_tracklet(tid, crops, metadata, out_video_dir)
-            saved_tracks += 1
+        # 나머지 tracklet 최종 저장
+        n = _save_tracklets_to_disk(
+            tracklets, camera_id, time_slot, video_path, src_fps,
+            frame_stride, save_crops, out_video_dir,
+        )
+        total_saved += n
+
+        # 영상 완료 → 진행 마커 삭제
+        progress_path = out_video_dir / VIDEO_PROGRESS_FILE
+        if progress_path.exists():
+            progress_path.unlink()
 
         stats = {
             "video_path": video_path,
@@ -196,7 +268,7 @@ class PersonTracker:
             "total_frames": total_frames,
             "processed_frames": processed,
             "frame_stride": frame_stride,
-            "num_tracklets": saved_tracks,
+            "num_tracklets": total_saved,
             "output_dir": str(out_video_dir),
         }
 

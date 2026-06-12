@@ -9,6 +9,7 @@ scripts/run_tracking.py
 
 import argparse
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -16,10 +17,12 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent))
 
 from pipeline.video_utils import load_config, load_videos_from_config
-from pipeline.tracker import PersonTracker
+from pipeline.tracker import PersonTracker, VIDEO_PROGRESS_FILE
 
 CHECKPOINT_FILENAME = "tracking_checkpoint.json"
 
+
+# ── 영상 간 체크포인트 (완료된 영상 목록) ──────────────────────────────────
 
 def _load_checkpoint(tracklet_dir: str) -> dict | None:
     path = Path(tracklet_dir) / CHECKPOINT_FILENAME
@@ -50,6 +53,24 @@ def _checkpoint_matches(checkpoint: dict, config_path: str, frame_stride: int, s
     )
 
 
+# ── 영상 내 체크포인트 (트래킹 중간 진행 상황) ──────────────────────────
+
+def _load_video_progress(tracklet_dir: str, item: dict) -> dict | None:
+    path = Path(tracklet_dir) / f"c{item['camera']}_t{item['slot']}" / VIDEO_PROGRESS_FILE
+    if not path.exists():
+        return None
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _clear_video_dir(tracklet_dir: str, item: dict) -> None:
+    """영상 출력 디렉토리 전체 삭제 (새로 시작 시 이전 부분 결과 제거)."""
+    video_dir = Path(tracklet_dir) / f"c{item['camera']}_t{item['slot']}"
+    if video_dir.exists():
+        shutil.rmtree(video_dir)
+        print(f"   [초기화] 이전 부분 결과 삭제: {video_dir}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="EYE-D — Tracking")
     parser.add_argument("--config", type=str, default="configs/config.yaml", help="Path to config file")
@@ -60,6 +81,12 @@ def main():
         help="Frame stride for tracking. (e.g., 30fps video with stride 6 simulates 5fps tracking)"
     )
     parser.add_argument("--no-crops", action="store_true", help="Do not save crop images (only metadata)")
+    parser.add_argument(
+        "--checkpoint-every",
+        type=int,
+        default=500,
+        help="처리된 프레임 N개마다 영상 내 체크포인트 저장. 0=비활성 (기본: 500)"
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -77,7 +104,7 @@ def main():
 
     save_crops = not args.no_crops
 
-    # ── 체크포인트 확인 ────────────────────────────────────────────────────
+    # ── 영상 간 체크포인트 확인 ───────────────────────────────────────────
     checkpoint = _load_checkpoint(tracklet_dir)
     completed: set[str] = set()
     accumulated_stats: dict = {}
@@ -98,7 +125,6 @@ def main():
                     print("[Fresh] 처음부터 새로 실행합니다.")
                     _remove_checkpoint(tracklet_dir)
             else:
-                # 완료 항목 없는 체크포인트는 무시
                 _remove_checkpoint(tracklet_dir)
         else:
             print("[체크포인트 발견] 설정이 달라 이전 체크포인트를 무시하고 새로 시작합니다.")
@@ -126,7 +152,7 @@ def main():
         verbose=False
     )
 
-    print(f"\n[Run] 객체 추적 & Tracklet 추출을 시작합니다... (stride={args.frame_stride})")
+    print(f"\n[Run] 객체 추적 & Tracklet 추출을 시작합니다... (stride={args.frame_stride}, checkpoint_every={args.checkpoint_every})")
 
     success_count = len(completed)
     total_tracklets = sum(s.get("num_tracklets", 0) for s in accumulated_stats.values())
@@ -142,7 +168,23 @@ def main():
             print(f"[MISSING] 영상 없음: {filename} -> 스킵")
             continue
 
-        print(f"\n - {filename} 트래킹 중...")
+        # ── 영상 내 체크포인트 확인 ─────────────────────────────────────
+        video_progress = _load_video_progress(tracklet_dir, item)
+        resume_from = None
+
+        if video_progress:
+            fi = video_progress["frame_idx"]
+            fc = video_progress["flushed_count"]
+            print(f"\n - {filename}")
+            print(f"   [영상 내 체크포인트] 프레임 {fi} 까지 처리됨 (저장된 tracklet {fc}개)")
+            answer = input("   이어서 실행하시겠습니까? [y/N] ").strip().lower()
+            if answer == "y":
+                resume_from = video_progress
+            else:
+                _clear_video_dir(tracklet_dir, item)
+        else:
+            print(f"\n - {filename} 트래킹 중...")
+
         try:
             stats = tracker.track_video(
                 video_path=item["path"],
@@ -150,13 +192,15 @@ def main():
                 time_slot=item["slot"],
                 output_dir=tracklet_dir,
                 frame_stride=args.frame_stride,
-                save_crops=save_crops
+                save_crops=save_crops,
+                checkpoint_every=args.checkpoint_every,
+                resume_from=resume_from,
             )
             print(f"   -> 완료: {stats['num_tracklets']}개 tracklet 저장됨 (경로: {stats['output_dir']})")
             success_count += 1
             total_tracklets += stats["num_tracklets"]
 
-            # 체크포인트 업데이트
+            # 영상 간 체크포인트 업데이트
             completed.add(filename)
             accumulated_stats[filename] = stats
             _save_checkpoint(tracklet_dir, {
