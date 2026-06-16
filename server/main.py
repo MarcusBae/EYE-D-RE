@@ -8,7 +8,7 @@ EYE-D FastAPI 서버 진입점.
 """
 
 from fastapi import FastAPI
-from server.routers import reid, health, retail
+from server.routers import reid, health, retail, security
 
 app = FastAPI(
     title="EYE-D Re-ID API",
@@ -19,3 +19,4 @@ app = FastAPI(
 app.include_router(health.router)
 app.include_router(reid.router, prefix="/reid")
 app.include_router(retail.router, prefix="/retail")
+app.include_router(security.router, prefix="/security")
