@@ -31,7 +31,10 @@ def _embed(file_bytes):
     img = cv2.imdecode(np.frombuffer(file_bytes, np.uint8), cv2.IMREAD_COLOR)
     if img is None:
         raise HTTPException(400, "이미지를 디코딩할 수 없습니다.")
-    return np.asarray(get_extractor().extract_image_feature(img), dtype=np.float32).ravel()
+    feat = np.asarray(get_extractor().extract_image_feature(img), dtype=np.float32).ravel()
+    if feat.size == 0 or not np.isfinite(feat).all() or float(np.linalg.norm(feat)) < 1e-6:
+        raise HTTPException(422, "임베딩이 비정상입니다(부실/빈 crop) - 등록 제외")
+    return feat
 
 def _search(feat, top_k):
     vec = "[" + ",".join(f"{x:.6f}" for x in feat) + "]"
@@ -102,7 +105,7 @@ async def ingest_detection(file: UploadFile = File(...), camera_id: str = "",
             cur.execute("SELECT global_id, ROUND((1-(embedding_identity <=> %s::vector))::numeric,4)::float8 AS sim "
                         "FROM detections ORDER BY embedding_identity <=> %s::vector LIMIT 1", (vec, vec))
             row = cur.fetchone()
-            if row and row["sim"] >= threshold:
+            if row and row["sim"] is not None and row["sim"] >= threshold:
                 gid, decision, sim = row["global_id"], "existing", row["sim"]
             else:
                 cur.execute("INSERT INTO persons (customer_tier) VALUES ('new') RETURNING global_id")
