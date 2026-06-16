@@ -135,4 +135,104 @@ scipy `linkage(method=self.linkage_method)` + `fcluster(t=self.threshold, criter
 - [x] `split_switched_tracklets.py` — 0.70 / 3연속(hysteresis) / 8min 확인
 - [x] `find_multi_person.py` — 개선점 4종 도출
 - [x] `analyze_cluster_purity.py` — global_id 내 트랙렛 대표임베딩 pairwise cosine, sim<0.6 쌍 비율="오염도", 읽기전용 purity_report.json (B2-닮은타인 탐지)
-- [x] `merge_same_camera_tracklets.py` — 같은 cam/slot + 시간 비겹침 + sim≥0.75 + gap≤300(≈75s) AND 병합 (A1 복구, must-not-link의 반대). 
+- [x] `merge_same_camera_tracklets.py` — 같은 cam/slot + 시간 비겹침 + sim≥0.75 + gap≤300(≈75s) AND 병합 (A1 복구, must-not-link의 반대). 보수적 설계
+- [x] `pipeline/tracker.py` — BoT-SORT(IoU+Re-ID) ID switch 1차 억제, but frame_stride≈6이 A1·B1 증폭. botsort.yaml에 연속성 임계
+
+---
+
+## 9. 실측 튜닝 결과 — 정답(43) 기반 평가 (2026-06-10)
+
+팀장 보관본 `data/curated`(233 트랙렛, **고유 global_id 43개 = 수동 큐레이션 정답**)를 ground-truth로
+삼아, 병합 결과를 쌍(pair) 단위로 평가. **merge recall** = 정답상 같은 사람 쌍 중 예측도 같이 묶은
+비율(높을수록 덜 쪼갬), **merge precision** = 예측상 같은 쌍 중 실제로 같은 사람 비율(높을수록 덜
+잘못 합침). 모든 실험은 `/tmp` 샌드박스에서 수행(원본 무손상).
+
+### 베이스라인 (현재 설정: threshold 0.20, allow_cross_slot off)
+- 예측 ID **107** vs 정답 43 → **recall 27.6% / precision 97.5%**
+- 해석: 잘못 합치는 일은 거의 없으나(과병합 7쌍), **같은 사람의 72%를 갈라놓음** = 심한 과분할.
+
+### 임계값 단독 스윕 (cross_slot off) — 막다른 길
+| threshold | 예측ID | recall | precision |
+|---|---|---|---|
+| 0.20 | 107 | 27.6% | 97.5% |
+| 0.30 | 73 | 35.1% | 70.9% |
+| 0.40 | 48 | 35.5% | 45.8% |
+
+→ 임계를 올려도 **recall이 ~35%에서 천장**(과분할 대부분이 cross-slot이라 임계로 못 고침),
+precision만 붕괴. **임계 단독 조정은 해답이 아님.**
+
+### allow_cross_slot ON — 핵심 해법
+| 설정 | 예측ID | recall | precision |
+|---|---|---|---|
+| 0.20, off (기존) | 107 | 27.6% | 97.5% |
+| **0.20, ON** | 81 | **57.4%** | **97.4%** |
+| **0.25, ON** | 56 | **74.1%** | 90.3% |
+
+→ **threshold 0.20에서 cross_slot만 켜면 recall이 2배(27.6→57.4%)인데 precision은 무손실(97.4%).**
+사실상 부작용 없는 개선. 0.25까지 올리면 recall 74%·ID 56개로 정답 43에 근접(precision 90%로 소폭
+하락, 과병합 77쌍 등장).
+
+### 권장 조정
+- **안전(precision 우선): `allow_cross_slot=True`, threshold 0.20** — recall 2배, 과병합 거의 무증가.
+- **적극(정답 근접): `allow_cross_slot=True`, threshold 0.25** — 단 과병합 77쌍은 적용 전 육안 점검 필요.
+- 과거 cross_slot을 끈 이유(ID 046 과병합)는 실측상 0.20-ON에서 과병합 7→15쌍으로 미미 → **우려가
+  과했고, 적정 임계면 cross_slot ON이 명백히 이득.**
+
+### ⚠️ 운영 주의 (이번에 배운 교훈)
+`merge_ids.py`는 `config.data.filtered_dir`(현재 **`data/curated`**)에 global_id를 **in-place로 덮어씀.**
+큐레이션 결과를 날릴 수 있으니 — ① 실행 전 그 폴더 백업 필수, ② config 값 먼저 확인, ③ 권장: 별도
+출력 폴더에 쓰도록 개선. (실험은 항상 샌드박스 복사본에서.)
+
+> 분석 도구: `scripts/find_oversplit.py`(과분할 후보 탐지), `scripts/eval_merge.py`(정답 대비 평가).
+
+---
+
+## 10. End-to-end · Fine-tuning 검증 + 방법론 주의 (2026-06-11)
+
+### 10-1. End-to-end — 자기-라벨 평가의 순환 함정
+개선 병합 데이터로 market1501 평가셋을 재생성해 평가하면 점수가 오르지만, **모델이 좋아진 게
+아니다.** 세 데이터셋(single matching):
+
+| 평가셋 (라벨) | 병합 ID | Query ID | mAP | Rank-1 |
+|---|---|---|---|---|
+| 사람-43 (독립 라벨) | 43 | 13 | 58.3% | 74.2% |
+| 자동 0.20-off | 107 | 11 | 74.4% | 83.3% |
+| 자동 0.25-on | 56 | 9 | 79.0% | 95.5% |
+
+Query ID는 줄어드는데(13→11→9) 점수는 오른다(74→95). 자동 병합이 모델 기준으로 더 묶을수록,
+그 라벨로 같은 모델을 평가하니 **점수가 부풀고 평가셋은 작고 쉬워진다(순환 평가).** → **신뢰할
+수 있는 성능 수치는 독립 라벨(사람-43)뿐이다.** 병합 품질은 정답 대비 recall/precision(§9)으로 판단.
+
+### 10-2. Fine-tuning — 30 IDs에선 불안정
+`finetune.py`(osnet_ain_x1_0 마지막 블록, Triplet+CE, Market AIN 가중치에서 시작)로 사람-43
+train(30 ID)에 학습 → 동일 harness(euclidean) 평가:
+
+| | mAP | Rank-1 | Rank-5 |
+|---|---|---|---|
+| zero-shot (학습 안 함) | 54.4% | 77.4% | 87.1% |
+| ft 5 epoch | **59.2%** | 77.4% | **93.5%** |
+| ft 10 epoch | 47.5% | 58.1% | 74.2% |
+| ft 30 epoch | 52.4% | 77.4% | 83.9% |
+
+5 epoch은 개선(mAP +4.8)이지만 10 epoch에서 급락 → **에폭 몇 개 차이로 출렁이는 불안정 상태.**
+30 train IDs로는 단일 실행을 신뢰할 수 없다(시드 평균 필요). **결론: fine-tuning은 "무익"이 아니라
+"데이터 부족으로 불안정". 조기 중단(light fine-tuning)은 데이터 확보 후 안정적 이득이 기대된다.**
+
+### 10-3. 방법론 주의 (팀 공유 권장)
+1. **순환 평가 금지:** 자동 병합 라벨로 같은 모델의 성능을 자랑하면 안 된다. 성능은 *독립(사람)
+   라벨* 평가셋으로만 보고.
+2. **거리척도 일치:** `evaluate_zeroshot`(cosine)와 `finetune` harness(euclidean)는 수치를 직접
+   비교하면 안 된다 — 같은 평가틀끼리만.
+3. **merge_ids in-place 위험:** §9 운영주의 참조 (실행 전 입력 폴더 백업 필수).
+
+> **종합:** 성능·과분할·fine-tuning 모든 층위에서 병목은 **데이터 양**. 측정 틀(정답 라벨 43,
+> eval harness, recall/precision)은 이미 확립 → 데이터가 늘면 같은 절차로 즉시 재측정 가능.
+
+---
+
+## 부록 — 한 줄 요약
+
+> "2명을 1명으로"는 **B1-공간(`find_multi_person`) / B1-시간(`split_switched_tracklets`) /
+> B2-동시발생(must-not-link, 해결됨) / B2-닮은타인(HAC 0.20)** 네 갈래. "같은 사람 다른 ID"는
+> 대부분 **cross-slot 가드(`allow_cross_slot=False`)의 구조적 분리**. 진단 도구는 이미 있으니
+> 새로 만들기보다 **정밀화 + 큐레이션 연결**이 핵심. fine-tuning은 데이터 확보 후.
