@@ -1,0 +1,23 @@
+# 침입탐지 제한구역 정의 — 카메라/배치별로 편집.
+# 적재:  python scripts/load_zones.py            # dry-run 미리보기
+#        python scripts/load_zones.py --apply    # 실제 DB 반영(해당 zone_id만 upsert)
+#        python scripts/load_zones.py --apply --replace-all   # 기존 zones 전체 교체
+# purpose 제한목적(restricted/no_entry/staff_only/금지구역) → 침입 판정 대상. 그 외(public)는 제외.
+# camera_id 는 cameras 테이블 참조(FK). 없으면 로더가 자동 등록.
+# polygon: 이미지 픽셀 좌표 [x, y] 꼭짓점 최소 3개.
+zones:
+  - zone_id: cam1_entrance
+    name: "정문 입구(출입금지)"
+    camera_id: CAM_01
+    purpose: no_entry
+    polygon: [[120,180],[430,180],[430,470],[120,470]]
+  - zone_id: cam2_staff
+    name: "직원 전용구역"
+    camera_id: CAM_02
+    purpose: staff_only
+    polygon: [[450,100],[620,100],[620,300],[450,300]]
+  - zone_id: cam1_lobby
+    name: "로비(허용)"
+    camera_id: CAM_01
+    purpose: public
+    polygon: [[0,0],[640,0],[640,480],[0,480]]
