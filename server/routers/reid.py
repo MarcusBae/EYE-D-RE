@@ -31,7 +31,10 @@ def _embed(file_bytes):
     img = cv2.imdecode(np.frombuffer(file_bytes, np.uint8), cv2.IMREAD_COLOR)
     if img is None:
         raise HTTPException(400, "이미지를 디코딩할 수 없습니다.")
-    return np.asarray(get_extractor().extract_image_feature(img), dtype=np.float32).ravel()
+    feat = np.asarray(get_extractor().extract_image_feature(img), dtype=np.float32).ravel()
+    if feat.size == 0 or not np.isfinite(feat).all() or float(np.linalg.norm(feat)) < 1e-6:
+        raise HTTPException(422, "임베딩이 비정상입니다(부실/빈 crop) - 등록 제외")
+    return feat
 
 def _search(feat, top_k):
     vec = "[" + ",".join(f"{x:.6f}" for x in feat) + "]"
@@ -83,3 +86,41 @@ async def match_person(file: UploadFile = File(...), top_k: int = 10, threshold:
         bs = best["max_similarity"] if best else 0.0
         decision = {"status": "unknown", "reason": f"best similarity {bs} < threshold {threshold}"}
     return {"decision": decision, "threshold": threshold, "top_k": top_k, "candidates": candidates}
+
+
+@router.post("/ingest")
+async def ingest_detection(file: UploadFile = File(...), camera_id: str = "",
+                           tracklet_id: str = "live-1", threshold: float = 0.6,
+                           commit: bool = False):
+    """실시간 검출 등록: 닮은 인물 있으면 그 global_id, 없으면 새 인물 생성
+    -> detections 기록 -> persons 갱신. commit=False(기본)=롤백(안전 dry-run)."""
+    feat = _embed(await file.read())
+    vec = "[" + ",".join(f"{x:.6f}" for x in feat) + "]"
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            if not camera_id:
+                cur.execute("SELECT camera_id FROM cameras LIMIT 1")
+                r = cur.fetchone(); camera_id = r["camera_id"] if r else None
+            cur.execute("SELECT global_id, ROUND((1-(embedding_identity <=> %s::vector))::numeric,4)::float8 AS sim "
+                        "FROM detections ORDER BY embedding_identity <=> %s::vector LIMIT 1", (vec, vec))
+            row = cur.fetchone()
+            if row and row["sim"] is not None and row["sim"] >= threshold:
+                gid, decision, sim = row["global_id"], "existing", row["sim"]
+            else:
+                cur.execute("INSERT INTO persons (customer_tier) VALUES ('new') RETURNING global_id")
+                gid, decision, sim = cur.fetchone()["global_id"], "new_person", (row["sim"] if row else None)
+            cur.execute("INSERT INTO detections (camera_id, global_id, tracklet_id, embedding_identity, detected_at) "
+                        "VALUES (%s,%s,%s,%s::vector, now()) RETURNING detection_id",
+                        (camera_id, gid, tracklet_id, vec))
+            det_id = cur.fetchone()["detection_id"]
+            cur.execute("UPDATE persons SET last_seen_at=now(), visit_count=visit_count+1 WHERE global_id=%s", (gid,))
+        if commit:
+            conn.commit()
+        else:
+            conn.rollback()
+    finally:
+        conn.close()
+    return {"decision": decision, "global_id": gid, "nearest_similarity": sim,
+            "detection_id": det_id, "camera_id": camera_id, "committed": commit,
+            "note": ("DB에 실제 기록됨" if commit else "dry-run: 롤백 - DB 변화 없음")}
