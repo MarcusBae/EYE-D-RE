@@ -126,6 +126,29 @@ python scripts/evaluate_zeroshot.py --config configs/config.yaml --matching mean
 # 출력: outputs/eval_results/results_{matching}[_rerank].json
 ```
 
+### 12단계: 성능 프로파일링 및 임계값 튜닝
+
+```bash
+# 12-1. 전체 파이프라인 처리 속도(FPS, RTF) 프로파일링
+python scripts/profile_pipeline.py --config configs/config.yaml
+
+# 12-2. 단계별 상세 지연 시간(Latency) 및 처리량(Throughput) 측정 (리포트 자동 생성)
+python scripts/profile_latency.py --config configs/config.yaml --video data/raw_videos/cam1_t3.avi
+
+# 12-3. HAC 클러스터링 최적 임계값(threshold) 검색
+python scripts/tune_threshold.py
+```
+
+### 13단계: 데모 애플리케이션 실행
+
+```bash
+# 13-1. 수동 검증용 시각화 데모 웹앱 (pre-processed data 기반)
+streamlit run scripts/demo_app.py
+
+# 13-2. 실시간 동영상 검출/추적/Re-ID 오버레이 스트리밍 웹앱 (online inference 기반)
+streamlit run scripts/video_reid_app.py
+```
+
 ---
 
 ## 📂 폴더 구조
@@ -167,7 +190,12 @@ EYE-D-RE/
 │   ├── analyze_cluster_purity.py      # 클러스터 순도 분석
 │   ├── merge_global_ids.py            # global_id 수동 병합
 │   ├── find_multi_person.py           # 다중 인물 트랙렛 탐지
-│   └── scatter_back.py                # curated → filtered 역전파
+│   ├── scatter_back.py                # curated → filtered 역전파
+│   ├── tune_threshold.py              # HAC 임계값(threshold) 스캔 및 튜닝
+│   ├── profile_pipeline.py            # 파이프라인 처리 속도 및 RTF 벤치마크
+│   ├── profile_latency.py             # 단계별 상세 지연 시간(Latency) 프로파일러
+│   ├── demo_app.py                    # 결과 검증용 Streamlit 데모 웹앱
+│   └── video_reid_app.py              # 실시간 영상 Re-ID Streamlit 스트리밍 웹앱
 ├── notebooks/
 │   └── 04_image_viewer.ipynb          # tracklet / Market-1501 / Query 뷰어
 ├── outputs/
@@ -195,18 +223,19 @@ EYE-D-RE/
 | **Cross-camera ID 병합** | OSNet + 제약 HAC + 수동 큐레이션 | ✅ 완료 |
 | **Market-1501 변환** | cross-camera query/gallery 분리 | ✅ 완료 |
 | **Zero-shot 평가** | mAP / Rank-k, multi-strategy | ✅ 완료 |
-| **성능 개선** | Re-ranking, Mean Pooling, OSNet-AIN | 진행 중 |
-| **Fine-tuning** | Triplet + CE loss | 다음 단계 |
-| **데모** | 오프라인 동선 분석 / 인물 탐색 | 다음 단계 |
+| **성능 개선** | Re-ranking, Mean Pooling, OSNet-AIN | ✅ 완료 |
+| **데모** | 오프라인 동선 분석 / 실시간 스트리밍 앱 | ✅ 완료 |
+| **Fine-tuning** | Triplet + CE loss 파인튜닝 | 다음 단계 |
 
 ---
 
-## 📊 현재 성능 (Zero-shot, 2026-06-04)
+## 📊 현재 성능 (Zero-shot, 2026-06-23 기준)
 
-| 조합 | Rank-1 | mAP | 비고 |
-|---|---|---|---|
-| OSNet x1.0, Market-1501, Single | 51.61% | 26.23% | Baseline |
-| OSNet x1.0, Market-1501, Re-ranking + Mean | **45.16%** | **54.56%** | 최우수 |
+| 모델 | 가중치 | 후처리 | Matching | Rank-1 | mAP | 비고 |
+|---|---|---|---|---|---|---|
+| OSNet x1.0 | Market-1501 | — | Single | 51.61% | 26.23% | Baseline |
+| OSNet x1.0 | Market-1501 | Re-ranking | Mean Pooling | 45.16% | 54.56% | 이전 최우수 |
+| OSNet-AIN x1.0 | MSMT17 | Re-ranking | Mean Pooling | **80.65%** | **82.83%** | **현재 최우수 (SOTA)** |
 
 - 데이터: `data/curated` (43명 / 1,216장, 수동 검수)
 - 평가: cross-camera query/gallery 분리, Query 31장 / Gallery 430장
@@ -229,3 +258,4 @@ EYE-D-RE/
 - BoT-SORT: Ultralytics 내장 구현
 - OSNet / torchreid: MIT
 - k-reciprocal Re-ranking: Zhong et al., CVPR 2017
+
