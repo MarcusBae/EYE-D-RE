@@ -730,66 +730,78 @@ elif _s == "pipeline":
     VIDEO_EXTS_C = {".mp4", ".avi", ".mov", ".mkv"}
     ROOT_C = Path(__file__).resolve().parent.parent
 
-    def _open_file_dialog_c() -> list[str]:
-        import tkinter as tk
-        from tkinter import filedialog
-        root = tk.Tk()
-        root.withdraw()
-        root.wm_attributes("-topmost", 1)
-        files = filedialog.askopenfilenames(
-            title="영상 파일 선택",
-            filetypes=[("영상 파일", "*.mp4 *.avi *.mov *.mkv"), ("모든 파일", "*.*")],
-        )
-        root.destroy()
-        return list(files)
-
-    def _open_folder_dialog_c() -> list[str]:
-        import tkinter as tk
-        from tkinter import filedialog
-        root = tk.Tk()
-        root.withdraw()
-        root.wm_attributes("-topmost", 1)
-        folder = filedialog.askdirectory(title="영상 폴더 선택")
-        root.destroy()
-        if not folder:
-            return []
-        p = Path(folder)
-        found: list[str] = []
-        for ext in VIDEO_EXTS_C:
-            found.extend(str(f) for f in sorted(p.glob(f"*{ext}")))
-        return found
-
     # ① 영상 파일 선택 ──────────────────────────────────────────────
     st.subheader("① 영상 파일 선택")
 
-    fb_col, fd_col, clr_col = st.columns([2, 2, 1])
-    with fb_col:
-        if st.button("📁 파일 선택...", use_container_width=True,
-                     help="개별 영상 파일을 선택합니다 (다중 선택 가능)"):
-            picked = _open_file_dialog_c()
-            if picked:
+    # 기본 비디오 폴더 입력 받기
+    video_dir_input = st.text_input("영상이 있는 폴더 경로", value="data/raw_videos", key="c_video_dir_input")
+    
+    # 해당 폴더 내의 비디오 파일들 탐색
+    video_files = []
+    p = Path(video_dir_input)
+    if p.exists() and p.is_dir():
+        for ext in VIDEO_EXTS_C:
+            video_files.extend(sorted(p.glob(f"*{ext}")))
+    
+    video_file_names = [f.name for f in video_files]
+    
+    # 기존 선택된 파일 목록 로드
+    current_selected = st.session_state.get("c_selected_files", [])
+    
+    # multiselect UI
+    if video_file_names:
+        # 기존 선택된 파일 중 현재 폴더에 속하는 파일들의 이름 추출
+        prev_selected_names = [Path(f).name for f in current_selected if Path(f).parent == p.resolve() or Path(f).parent == p]
+        
+        selected_names = st.multiselect(
+            "선택할 영상 파일들 (다중 선택 가능)",
+            options=video_file_names,
+            default=prev_selected_names,
+            help="폴더 내에서 분석할 영상을 선택하세요."
+        )
+        
+        # 선택된 파일들 전체 경로 리스트 구축
+        new_selected = []
+        # 1. multiselect에서 선택한 파일들 경로 추가
+        for name in selected_names:
+            new_selected.append(str((p / name).resolve()))
+        # 2. multiselect에 표시되지 않는 파일들(다른 폴더 경로의 파일들)은 그대로 유지
+        for f in current_selected:
+            if Path(f).parent != p.resolve() and Path(f).parent != p:
+                new_selected.append(f)
+                
+        st.session_state["c_selected_files"] = new_selected
+    else:
+        st.warning(f"'{video_dir_input}' 폴더에 지원하는 영상 파일({', '.join(VIDEO_EXTS_C)})이 존재하지 않습니다.")
+
+    # 추가 파일 입력 및 전체 지우기 행
+    add_col1, add_col2, clr_col = st.columns([4, 2, 2])
+    with add_col1:
+        custom_file_input = st.text_input("개별 파일 경로 추가 (필요 시)", placeholder="예: /absolute/path/to/video.mp4")
+    with add_col2:
+        st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True) # 버튼 위치 맞춤
+        if st.button("➕ 추가", use_container_width=True, disabled=not custom_file_input):
+            custom_path = Path(custom_file_input)
+            if custom_path.exists() and custom_path.is_file():
                 prev = st.session_state.get("c_selected_files", [])
-                st.session_state["c_selected_files"] = list(dict.fromkeys(prev + picked))
-                st.rerun()
-    with fd_col:
-        if st.button("📂 폴더 선택...", use_container_width=True,
-                     help="폴더를 선택하면 하위 영상 파일을 모두 추가합니다"):
-            picked = _open_folder_dialog_c()
-            if picked:
-                prev = st.session_state.get("c_selected_files", [])
-                st.session_state["c_selected_files"] = list(dict.fromkeys(prev + picked))
-                st.rerun()
-            elif picked == []:
-                st.warning("선택한 폴더에 영상 파일이 없습니다.")
+                full_path_str = str(custom_path.resolve())
+                if full_path_str not in prev:
+                    st.session_state["c_selected_files"] = prev + [full_path_str]
+                    st.success(f"추가 완료: {custom_path.name}")
+                    st.rerun()
+            else:
+                st.error("올바르지 않거나 존재하지 않는 파일 경로입니다.")
     with clr_col:
+        st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True) # 버튼 위치 맞춤
         if st.button("🗑 전체 지우기", use_container_width=True,
                      disabled=not st.session_state.get("c_selected_files")):
             st.session_state["c_selected_files"] = []
             st.rerun()
 
+    # 선택된 파일 목록 시각화
     selected_c: list[str] = st.session_state.get("c_selected_files", [])
-
     if selected_c:
+        st.caption("선택된 파일 목록:")
         with st.container(border=True):
             for _fi, _fp in enumerate(selected_c):
                 _rc1, _rc2 = st.columns([8, 1])
@@ -800,7 +812,7 @@ elif _s == "pipeline":
                         st.session_state["c_selected_files"].pop(_fi)
                         st.rerun()
     else:
-        st.caption("📁 파일 선택 또는 📂 폴더 선택 버튼으로 영상을 추가하세요.")
+        st.caption("선택된 영상 파일이 없습니다.")
 
     # ② 파라미터 ────────────────────────────────────────────────────
     st.subheader("② 파라미터")
@@ -1050,7 +1062,7 @@ elif _s == "pipeline":
 
             # ── Step 5: HAC 클러스터링 ────────────────────────────
             with st.status("🔗 Step 5: 인물 ID 배정 (HAC 클러스터링)...", expanded=False) as _s5:
-                _pids_c = _run_matching(_tracklets_c, _feats_arr, c_thresh)
+                _pids_c = _run_matching(_tracklets_c, _feats_arr, c_thresh, config=cfg_c)
                 _n_new_persons = len(set(_pids_c))
                 _s5.update(
                     label=f"✅ Step 5: 클러스터링 완료 — {_n_new_persons}명 식별",

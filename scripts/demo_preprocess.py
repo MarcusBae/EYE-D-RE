@@ -211,57 +211,62 @@ def run_quality_filter(tracklet_dir: Path, filtered_dir: Path, config: dict) -> 
 
 
 def run_matching(tracklets: list, feats: np.ndarray, threshold: float,
-                 debug: bool = False) -> list:
-    """HAC 클러스터링으로 person_id 배정."""
-    from scipy.cluster.hierarchy import fclusterdata
-    from scipy.spatial.distance import cdist
+                 config: dict | None = None, debug: bool = False) -> list:
+    """HAC 클러스터링으로 person_id 배정.
+    
+    CrossCameraMerger를 사용하여 동시성 제약 조건(Must-not-link) 및 위반 클러스터 강제 분리까지 포함한
+    일관성 있는 병합 결과를 생성합니다.
+    """
+    from pipeline.reid_merger import CrossCameraMerger
+    import yaml
 
-    # [단계 1] 특징 벡터 L2 정규화 (L2 Normalization)
-    norms = np.linalg.norm(feats, axis=1, keepdims=True)
-    feats_norm = feats / np.maximum(norms, 1e-8)
-
-    if debug:
-        dist_mat = cdist(feats_norm, feats_norm, metric="cosine")
-
-        def _tid(t: dict) -> str:
-            p = Path(t["tracklet_dir"])
-            return f"{p.parent.name}/{p.name}"
-
-        print(f"\n[DEBUG run_matching] 트랙렛 {len(tracklets)}개 / threshold={threshold}")
-        print(f"[DEBUG] 특징 벡터 norm 범위: min={norms.min():.4f}  max={norms.max():.4f}")
-        print("[DEBUG] pairwise cosine distance matrix:")
-        labels_w = max(len(_tid(t)) for t in tracklets)
-        header = " " * (labels_w + 2) + "  ".join(
-            _tid(t)[-10:] for t in tracklets
-        )
-        print(header)
-        for i, t in enumerate(tracklets):
-            row = "  ".join(f"{dist_mat[i,j]:.3f}" for j in range(len(tracklets)))
-            print(f"  {_tid(t):<{labels_w}}  {row}")
-        print(f"[DEBUG] threshold={threshold} 기준으로 병합될 쌍 (dist < threshold):")
-        merged = [(i, j) for i in range(len(tracklets))
-                  for j in range(i+1, len(tracklets))
-                  if dist_mat[i, j] < threshold]
-        if merged:
-            for i, j in merged:
-                print(f"    {_tid(tracklets[i])} ↔ {_tid(tracklets[j])}  dist={dist_mat[i,j]:.4f}")
+    if config is None:
+        cfg_path = Path(__file__).resolve().parent.parent / "configs" / "config.yaml"
+        if cfg_path.exists():
+            with open(cfg_path, encoding="utf-8") as f:
+                config = yaml.safe_load(f)
         else:
-            print("    (없음 — 모든 트랙렛이 별도 클러스터)")
+            config = {}
 
-    # [단계 2] 계층적 병합 군집화 (HAC Clustering) 수행
-    labels = fclusterdata(feats_norm, t=threshold,
-                          criterion="distance", metric="cosine", method="average")
+    merger = CrossCameraMerger(config)
+    merger.threshold = threshold
 
-    if debug:
-        from collections import Counter
-        cluster_counts = Counter(int(l) for l in labels)
-        print(f"[DEBUG] 클러스터 결과: {len(cluster_counts)}개 클러스터")
-        for cid, cnt in sorted(cluster_counts.items()):
-            members = [_tid(tracklets[i])
-                       for i, l in enumerate(labels) if int(l) == cid]
-            print(f"    cluster {cid}: {cnt}개 트랙렛 → {members}")
+    # 1. feats가 np.ndarray인 경우 None이 포함된 list로 변환 (0 벡터인 경우 None으로 간주)
+    features_list = []
+    for f in feats:
+        if f is None or np.all(f == 0):
+            features_list.append(None)
+        else:
+            features_list.append(f)
 
-    return [int(l) for l in labels]
+    # 2. 유효한 트랙렛 필터링
+    valid_tracklets, valid_features, skipped_tracklets = merger.filter_valid_tracklets(tracklets, features_list)
+
+    if not valid_tracklets:
+        return [-1] * len(tracklets)
+
+    # 3. 거리 행렬 계산
+    dist_matrix = merger.compute_distance_matrix(valid_features)
+
+    # 4. 동시성 제약 조건 적용
+    constrained_dist_matrix = merger.apply_must_not_link_constraints(dist_matrix, valid_tracklets)
+
+    # 5. HAC 클러스터링 실행
+    labels = merger.run_hac_clustering(constrained_dist_matrix)
+
+    # 6. Must-not-link 위반 클러스터 강제 분리
+    labels = merger.enforce_must_not_link(labels, valid_tracklets)
+
+    # 7. 원래 tracklets와 순서를 매핑
+    tid_to_label = {}
+    for t, lbl in zip(valid_tracklets, labels):
+        tid_to_label[t["tracklet_dir"]] = int(lbl)
+
+    final_labels = []
+    for t in tracklets:
+        final_labels.append(tid_to_label.get(t["tracklet_dir"], -1))
+
+    return final_labels
 
 
 # ── 공통: 특징 추출 ───────────────────────────────────────────────
@@ -398,7 +403,7 @@ def main():
         cam_slot_start = build_cam_slot_start(config)
         print(f"[INFO] 캐시 로드: {len(tracklets)}개 트랙렛, feats={feats.shape}")
         print(f"[INFO] threshold={args.threshold}, debug={args.debug}")
-        person_ids = run_matching(tracklets, feats, args.threshold, debug=args.debug)
+        person_ids = run_matching(tracklets, feats, args.threshold, config=config, debug=args.debug)
         persons    = save_demo_data(tracklets, person_ids, feats, out_dir,
                                     tracklets[0]["tracklet_dir"].rsplit("/", 2)[0] if tracklets else "",
                                     cam_slot_start=cam_slot_start)
@@ -514,7 +519,7 @@ def main():
         person_ids = [t["global_id"] for t in tracklets]
     else:
         print(f"[INFO] HAC 클러스터링 (threshold={args.threshold})")
-        person_ids = run_matching(tracklets, feats, args.threshold, debug=args.debug)
+        person_ids = run_matching(tracklets, feats, args.threshold, config=config, debug=args.debug)
 
     # demo_data 저장
     print("\n[STEP 4] demo_data 저장")

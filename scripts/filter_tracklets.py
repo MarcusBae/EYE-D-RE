@@ -46,19 +46,45 @@ def main():
 
     print(f"\n[Run] Tracklet 품질 필터링 시작 (소스: {tracklet_dir} -> 목적지: {filtered_dir})")
     
-    # 모든 tracklet 필터링 진행 및 복사
-    stats = q_filter.filter_all(
-        tracklet_dir=tracklet_dir,
-        output_dir=filtered_dir,
-        copy_crops=True,
-        verbose=True
-    )
+    tracklet_path = Path(tracklet_dir)
+    filtered_path = Path(filtered_dir)
+    filtered_path.mkdir(parents=True, exist_ok=True)
+
+    slot_dirs = sorted([d for d in tracklet_path.iterdir() if d.is_dir()])
+    
+    total_stats = {
+        "total": 0,
+        "passed": 0,
+        "failed": 0,
+        "failure_reasons": {}
+    }
+
+    for slot_dir in slot_dirs:
+        print(f"\n  -> 슬롯 처리 중: {slot_dir.name}")
+        stats = q_filter.filter_all(
+            tracklet_dir=str(slot_dir),
+            output_dir=str(filtered_path / slot_dir.name),
+            copy_crops=True,
+            verbose=True
+        )
+        total_stats["total"] += stats.get("total", 0)
+        total_stats["passed"] += stats.get("passed", 0)
+        total_stats["failed"] += stats.get("failed", 0)
+        for r, count in stats.get("failure_reasons", {}).items():
+            total_stats["failure_reasons"][r] = total_stats["failure_reasons"].get(r, 0) + count
+
+    print("\n" + "="*60)
+    print(f"[Filter 종합] 전체 {total_stats['total']} → 통과 {total_stats['passed']} ({(total_stats['passed']/total_stats['total']*100) if total_stats['total'] > 0 else 0.0:.1f}%)")
+    print("[Filter 종합] 탈락 사유 분포:")
+    for k, v in sorted(total_stats["failure_reasons"].items(), key=lambda x: -x[1]):
+        print(f" - {k:<20} : {v}")
+    print("="*60)
 
     # 썸네일 시각화 생성 여부
     if args.visualize:
         print("\n[Run] 시각화용 썸네일 그리드 생성을 시작합니다...")
-        passed_tracks = list_tracklets(filtered_dir)
-        grid_out = Path(filtered_dir) / "passed_tracklets_grid.png"
+        passed_tracks = list_tracklets(str(filtered_path))
+        grid_out = filtered_path / "passed_tracklets_grid.png"
         make_thumbnail_grid(
             tracklets=passed_tracks,
             output_path=str(grid_out),

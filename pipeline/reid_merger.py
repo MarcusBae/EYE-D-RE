@@ -348,7 +348,7 @@ class CrossCameraMerger:
             cluster_to_idxs[int(lbl)].append(idx)
 
         new_labels = labels.copy()
-        next_label = int(max(labels)) + 1
+        next_label = int(max(labels)) + 1 if len(labels) > 0 else 1
         split_count = 0
 
         for lbl, idxs in cluster_to_idxs.items():
@@ -396,6 +396,8 @@ class CrossCameraMerger:
 
     def compute_distance_matrix(self, features: List[np.ndarray]) -> np.ndarray:
         """특징 벡터 리스트 간 Cosine 거리 행렬 계산."""
+        if not features:
+            return np.empty((0, 0), dtype=np.float32)
         feats_arr = np.array(features)  # shape: [N, 512]
         
         # 모든 벡터가 L2 정규화되어 있으므로, 
@@ -432,6 +434,12 @@ class CrossCameraMerger:
 
     def run_hac_clustering(self, dist_matrix: np.ndarray) -> np.ndarray:
         """HAC(계층적 군집화) 알고리즘을 수행하여 클러스터 레이블 반환."""
+        n = dist_matrix.shape[0]
+        if n == 0:
+            return np.array([], dtype=np.int32)
+        if n == 1:
+            return np.array([1], dtype=np.int32)
+
         # 1D condensed distance matrix 변환
         condensed_d = squareform(dist_matrix)
         

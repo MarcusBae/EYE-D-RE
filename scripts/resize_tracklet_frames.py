@@ -43,7 +43,7 @@ def resize_one(jpg_path: str) -> tuple[str, bool]:
 
 def main():
     parser = argparse.ArgumentParser(description=f"트랙렛 이미지 {TARGET_H}×{TARGET_W} 리사이즈")
-    parser.add_argument("--tracklets-dir", default="data/tracklets-1-original-reduced")
+    parser.add_argument("--tracklets-dir", default="data/tracklets")
     parser.add_argument("--workers", type=int, default=4, help="병렬 프로세스 수 (기본: 4)")
     parser.add_argument("--dry-run", action="store_true", help="실제 변환 없이 대상만 출력")
     args = parser.parse_args()
